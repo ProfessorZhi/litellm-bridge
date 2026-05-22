@@ -30,6 +30,17 @@ class _PROXY_MaxBudgetLimiter(CustomLogger):
             if max_budget is None or user_id is None:
                 return
 
+            # Skip budget check for zero-cost models
+            model = data.get("model")
+            if model is not None:
+                try:
+                    from litellm.proxy.proxy_server import llm_router
+                    from litellm.proxy.auth.auth_checks import _is_model_cost_zero
+                    if _is_model_cost_zero(model=model, llm_router=llm_router):
+                        return
+                except Exception:
+                    pass
+
             # Personal budget applies only to non-team requests, matching
             # the explicit team-key exemption in common_checks section 4.1.
             if user_api_key_dict.team_id is not None:
@@ -53,6 +64,7 @@ class _PROXY_MaxBudgetLimiter(CustomLogger):
             curr_spend = await get_current_spend(
                 counter_key=user_counter_key,
                 fallback_spend=user_api_key_dict.user_spend or 0.0,
+                max_budget=max_budget,
             )
 
             verbose_proxy_logger.debug(
