@@ -13,7 +13,14 @@ new_ui_login_url = get_custom_url("", "ui/login")
 def build_ui_login_form(
     show_deprecation_banner: bool = False,
     hide_default_credentials_hint: bool = False,
+    base_url: str = "",
 ) -> str:
+    feishu_app_id = os.getenv("FEISHU_APP_ID", "")
+    feishu_login_url = (
+        f"https://open.feishu.cn/open-apis/authen/v1/index"
+        f"?redirect_uri={base_url}sso/feishu/callback"
+        f"&app_id={feishu_app_id}"
+    ) if feishu_app_id else ""
     banner_html = (
         f"""
         <div class="deprecation-banner">
@@ -26,21 +33,30 @@ def build_ui_login_form(
         else ""
     )
 
+    # LITELLM-UI-001: 默认凭据提示 → 替换为三个飞书配置教程链接
+    # （URL 与登录后首页顶部 GuideButtons 一致，fjdynamics 飞书 wiki）
     info_box_html = (
         ""
         if hide_default_credentials_hint
         else """
-        <div class="info-box">
+        <div class="info-box guide-box">
             <div class="info-header">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <line x1="12" y1="16" x2="12" y2="12"></line>
-                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
-                </svg>
-                Default Credentials
+                使用指南 & 配置教程
             </div>
-            <p>By default, Username is <code>admin</code> and Password is your set LiteLLM Proxy <code>MASTER_KEY</code>.</p>
-            <p>Need to set UI credentials or SSO? <a href="https://docs.litellm.ai/docs/proxy/ui" target="_blank">Check the documentation</a>.</p>
+            <div class="guide-links">
+                <a href="https://fjdynamics.feishu.cn/wiki/FE5awqnh8i8p0Ak9G8jc6xpPnjd?from=from_copylink" target="_blank" rel="noopener noreferrer" class="guide-link">
+                    <span class="guide-dot" style="background:#3B82F6"></span>LiteLLM 使用指南
+                </a>
+                <a href="https://fjdynamics.feishu.cn/wiki/Lul8wmoCki6NqYkCf9fcsr0gnBh?from=from_copylink" target="_blank" rel="noopener noreferrer" class="guide-link">
+                    <span class="guide-dot" style="background:#D97757"></span>Claude 配置教程
+                </a>
+                <a href="https://fjdynamics.feishu.cn/wiki/AaWawVDUziMxJXkmeh0cA8dYnmx?from=from_copylink" target="_blank" rel="noopener noreferrer" class="guide-link">
+                    <span class="guide-dot" style="background:#10A37F"></span>Codex 配置教程
+                </a>
+                <a href="https://fjdynamics.feishu.cn/wiki/Ltyaw1xIPiPa70kGoJGc5baOnGb?from=from_copylink" target="_blank" rel="noopener noreferrer" class="guide-link">
+                    <span class="guide-dot" style="background:#7C3AED"></span>Workbuddy 配置教程
+                </a>
+            </div>
         </div>
         """
     )
@@ -126,6 +142,42 @@ def build_ui_login_form(
             margin: 8px 0;
             line-height: 1.5;
             font-size: 14px;
+        }}
+
+        .guide-links {{
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 12px;
+        }}
+
+        .guide-link {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 12px;
+            border-radius: 6px;
+            background-color: #fff;
+            border: 1px solid #e2e8f0;
+            color: #334155;
+            font-size: 14px;
+            font-weight: 500;
+            text-decoration: none;
+            transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
+        }}
+
+        .guide-link:hover {{
+            border-color: #94a3b8;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+            transform: translateY(-1px);
+            text-decoration: none;
+        }}
+
+        .guide-dot {{
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            flex-shrink: 0;
         }}
 
         label {{
@@ -226,6 +278,36 @@ def build_ui_login_form(
             margin-bottom: 20px;
         }}
 
+        .sso-section {{
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
+        }}
+
+        .sso-button {{
+            display: block;
+            padding: 12px 16px;
+            background-color: #3370ff;
+            color: #fff;
+            text-align: center;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: 500;
+            transition: background-color 0.2s;
+            margin-top: 10px;
+        }}
+
+        .sso-button:hover {{
+            background-color: #2856c6;
+            text-decoration: none;
+        }}
+
+        .sso-button svg {{
+            vertical-align: middle;
+            margin-right: 8px;
+        }}
+
+
         .deprecation-banner {{
             background-color: #fee2e2;
             border: 1px solid #ef4444;
@@ -253,7 +335,6 @@ def build_ui_login_form(
             </div>
         </div>
         <h2>Login</h2>
-        <p class="subtitle">Access your LiteLLM Admin UI.</p>
         {info_box_html}
         <label for="username">Username<span class="required">*</span></label>
         <input type="text" id="username" name="username" required placeholder="Enter your username" autocomplete="username">
@@ -265,6 +346,14 @@ def build_ui_login_form(
             <label for="show-password">Show password</label>
         </div>
         <input type="submit" value="Login">
+        <div class="sso-section">
+            <a href="{feishu_login_url}" class="sso-button">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>
+                </svg>
+                通过飞书登录
+            </a>
+        </div>
     </form>
     <script>
         function togglePasswordVisibility() {{

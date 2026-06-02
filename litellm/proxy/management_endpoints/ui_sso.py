@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 import jwt
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
+import httpx
 
 import litellm
 from litellm._logging import verbose_proxy_logger
@@ -2376,8 +2377,8 @@ async def insert_sso_user(
         user_id=user_defined_values["user_id"],
         user_email=normalize_email(user_defined_values["user_email"]),
         user_role=user_defined_values["user_role"],  # type: ignore
-        max_budget=user_defined_values["max_budget"],
-        budget_duration=user_defined_values["budget_duration"],
+        max_budget=user_defined_values.get("max_budget") or 20.0,
+        budget_duration=user_defined_values.get("budget_duration") or "1d",
         sso_user_id=user_defined_values["user_id"],
         auto_create_key=False,
     )
@@ -3679,6 +3680,28 @@ class SSOAuthenticationHandler:
             )
         token_response: dict = token_response_raw
 
+        # Handle providers that wrap the OAuth token fields inside a nested
+        # "data" object (e.g. Feishu returns {"code": 0, "data": {"access_token": ...}}).
+        # Also check for error indicators in the wrapper.
+        if "data" in token_response and isinstance(token_response.get("data"), dict):
+            wrapper_code = token_response.get("code")
+            # Feishu uses code != 0 to signal errors (with HTTP 200).
+            if isinstance(wrapper_code, int) and wrapper_code != 0:
+                error_msg = token_response.get("msg", token_response.get("error_description", ""))
+                error_type = token_response.get("error", "")
+                detail = f"{error_type} ({wrapper_code}) - {error_msg}" if error_type else f"code {wrapper_code}: {error_msg}"
+                verbose_proxy_logger.error(
+                    "Token endpoint returned error in wrapper. detail=%s", detail
+                )
+                raise ProxyException(
+                    message=f"Token exchange failed: {detail}",
+                    type=ProxyErrorTypes.auth_error,
+                    param="token_exchange",
+                    code=status.HTTP_401_UNAUTHORIZED,
+                )
+            # Unwrap the nested data dict so downstream code sees a flat response.
+            token_response = token_response["data"]
+
         access_token_val = token_response.get("access_token")
         if not isinstance(access_token_val, str) or not access_token_val:
             error = token_response.get("error")
@@ -3736,9 +3759,14 @@ class SSOAuthenticationHandler:
         if redirect_url:
             token_data["redirect_uri"] = redirect_url
 
+        # Some providers (e.g. Feishu) require JSON bodies instead of form-urlencoded.
+        # GENERIC_TOKEN_CONTENT_TYPE=application/json switches to JSON encoding.
+        _token_content_type = os.getenv(
+            "GENERIC_TOKEN_CONTENT_TYPE", "application/x-www-form-urlencoded"
+        )
         request_headers = {
             **additional_headers,
-            "Content-Type": "application/x-www-form-urlencoded",  # must not be overridden
+            "Content-Type": _token_content_type,
             "Accept": "application/json",
         }
 
@@ -3754,11 +3782,15 @@ class SSOAuthenticationHandler:
             if client_secret:
                 token_data["client_secret"] = client_secret
 
-        http_client = get_async_httpx_client(llm_provider=httpxSpecialProvider.SSO_HANDLER)
+        http_client = get_async_httpx_client(
+            llm_provider=httpxSpecialProvider.SSO_HANDLER
+        )
+        _use_json_body = "application/json" in _token_content_type
         try:
             response = await http_client.post(
                 url=token_endpoint,
-                data=token_data,
+                json=token_data if _use_json_body else None,
+                data=None if _use_json_body else token_data,
                 headers=request_headers,
                 timeout=30.0,
             )
@@ -3866,7 +3898,18 @@ class SSOAuthenticationHandler:
                             )
                             userinfo = None
                         else:
-                            userinfo = userinfo_raw
+                            # Handle providers that wrap userinfo inside a nested
+                            # "data" object (e.g. Feishu returns
+                            # {"code": 0, "data": {"name": ..., "open_id": ...}}).
+                            if (
+                                isinstance(userinfo_raw, dict)
+                                and "data" in userinfo_raw
+                                and isinstance(userinfo_raw.get("data"), dict)
+                                and "access_token" not in userinfo_raw
+                            ):
+                                userinfo = userinfo_raw["data"]
+                            else:
+                                userinfo = userinfo_raw
                     except Exception as json_err:
                         verbose_proxy_logger.warning(
                             "Userinfo endpoint returned non-JSON response (status 200): %s",
@@ -4500,3 +4543,220 @@ async def debug_sso_callback(request: Request):
     )
 
     return HTMLResponse(content=html_content)
+
+
+@router.get("/sso/feishu/callback", tags=["experimental"], include_in_schema=False)
+async def feishu_login_callback(request: Request, code: str, state: Optional[str] = None):
+    """
+    飞书OAuth2.0登录回调处理
+    """
+    import jwt
+    from fastapi.responses import RedirectResponse
+    from litellm.proxy.proxy_server import (
+        general_settings,
+        generate_key_helper_fn,
+        master_key,
+        premium_user,
+        proxy_logging_obj,
+        user_api_key_cache,
+    )
+    from litellm.types.proxy.ui_sso import ReturnedUITokenObject
+    from litellm.proxy.utils import get_prisma_client_or_throw
+
+    prisma_client = get_prisma_client_or_throw(
+        "Prisma client is None, connect a database to your proxy"
+    )
+
+    verbose_proxy_logger.info(f"[飞书登录] 收到回调, code: {code}, state: {state}")
+
+    try:
+        feishu_app_id = os.getenv("FEISHU_APP_ID", os.getenv("GENERIC_CLIENT_ID"))
+        feishu_app_secret = os.getenv("FEISHU_APP_SECRET", os.getenv("GENERIC_CLIENT_SECRET"))
+
+        if not feishu_app_id or not feishu_app_secret:
+            raise HTTPException(
+                status_code=500,
+                detail="飞书应用配置未设置，请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET"
+            )
+
+        async with httpx.AsyncClient() as client:
+            token_response = await client.post(
+                "https://open.feishu.cn/open-apis/authen/v2/oauth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "client_id": feishu_app_id,
+                    "client_secret": feishu_app_secret,
+                    "code": code,
+                    "redirect_uri": f"{str(request.base_url).rstrip('/')}/sso/feishu/callback",
+                }
+            )
+            token_data = token_response.json()
+
+            verbose_proxy_logger.info(f"[飞书登录] token响应: {token_data}")
+
+            if "access_token" not in token_data:
+                verbose_proxy_logger.error(f"[飞书登录] 获取access_token失败: {token_data}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"获取飞书access_token失败: {token_data.get('error_description', token_data.get('error', 'Unknown error'))}"
+                )
+
+            access_token = token_data["access_token"]
+            verbose_proxy_logger.info("[飞书登录] 成功获取access_token")
+
+            user_response = await client.get(
+                "https://open.feishu.cn/open-apis/authen/v1/user_info",
+                headers={"Authorization": f"Bearer {access_token}"}
+            )
+            user_response_data = user_response.json()
+
+            verbose_proxy_logger.info(f"[飞书登录] 用户信息响应: {user_response_data}")
+
+            if user_response_data.get("code") != 0:
+                verbose_proxy_logger.error(f"[飞书登录] 获取用户信息失败: {user_response_data}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"获取飞书用户信息失败: {user_response_data.get('msg', 'Unknown error')}"
+                )
+
+            user_data = user_response_data.get("data", {})
+
+            user_id = user_data.get("open_id") or user_data.get("union_id") or user_data.get("user_id")
+            user_email = user_data.get("email", "")
+            user_name = user_data.get("name", "")
+            mobile = user_data.get("mobile", "")
+
+            if not user_id:
+                verbose_proxy_logger.error(f"[飞书登录] 用户信息缺少ID字段: {user_data}")
+                raise HTTPException(
+                    status_code=400,
+                    detail="获取飞书用户信息失败，缺少用户ID"
+                )
+
+            if not user_email:
+                user_email = mobile if mobile else f"{user_id}@feishu.local"
+
+            verbose_proxy_logger.info(
+                f"[飞书登录] 用户信息 - user_id: {user_id}, email: {user_email}, name: {user_name}"
+            )
+
+            user_id_models: List = []
+            max_internal_user_budget = litellm.max_internal_user_budget
+            internal_user_budget_duration = litellm.internal_user_budget_duration
+
+            user_defined_values = SSOUserDefinedValues(
+                models=user_id_models,
+                user_id=user_id,
+                user_email=user_email,
+                max_budget=max_internal_user_budget,
+                user_role=LitellmUserRoles.INTERNAL_USER.value,
+                budget_duration=internal_user_budget_duration,
+            )
+
+            result_openid = {"id": user_id, "email": user_email}
+
+            user_info = await get_user_info_from_db(
+                result=result_openid,
+                prisma_client=prisma_client,
+                user_api_key_cache=user_api_key_cache,
+                proxy_logging_obj=proxy_logging_obj,
+                user_email=user_email,
+                user_defined_values=user_defined_values,
+                alternate_user_id=user_id,
+            )
+
+            if user_info is None:
+                verbose_proxy_logger.warning("[飞书登录] get_user_info_from_db返回None，尝试直接创建用户")
+                try:
+                    from litellm.proxy.management_endpoints.internal_user_endpoints import new_user
+                    _feishu_user_email = user_email.lower() if user_email else None
+                    new_user_request = NewUserRequest(
+                        user_id=user_id,
+                        user_email=_feishu_user_email,
+                        user_role=LitellmUserRoles.INTERNAL_USER,
+                        max_budget=max_internal_user_budget,
+                        budget_duration=internal_user_budget_duration,
+                        auto_create_key=False,
+                    )
+                    user_info = await new_user(
+                        data=new_user_request,
+                        user_api_key_dict=UserAPIKeyAuth(user_role=LitellmUserRoles.PROXY_ADMIN),
+                    )
+                    verbose_proxy_logger.info(f"[飞书登录] 成功创建新用户: {user_info.user_id}")
+                except Exception as insert_error:
+                    verbose_proxy_logger.exception(f"[飞书登录] 创建用户失败: {insert_error}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"创建用户失败: {str(insert_error)}"
+                    )
+
+            default_ui_key_values: Dict[str, Any] = {
+                "duration": "24hr",
+                "key_max_budget": litellm.max_ui_session_budget,
+                "aliases": {},
+                "config": {},
+                "spend": 0,
+                "team_id": "litellm-dashboard",
+                "models": user_defined_values["models"],
+                "user_id": user_defined_values["user_id"],
+                "user_email": user_defined_values["user_email"],
+                "max_budget": user_defined_values["max_budget"],
+                "user_role": user_defined_values["user_role"],
+                "budget_duration": user_defined_values["budget_duration"],
+            }
+            default_ui_key_values["request_type"] = "key"
+
+            response = await generate_key_helper_fn(
+                **default_ui_key_values,
+                table_name="key",
+            )
+
+            key = response["token"]
+            response_user_id = response["user_id"]
+            user_role = user_defined_values.get("user_role") or LitellmUserRoles.INTERNAL_USER_VIEW_ONLY.value
+
+            verbose_proxy_logger.info(f"[飞书登录] 成功生成UI key for user: {response_user_id}")
+
+            disabled_non_admin_personal_key_creation = (
+                get_disabled_non_admin_personal_key_creation()
+            )
+
+            returned_ui_token_object = ReturnedUITokenObject(
+                user_id=cast(str, response_user_id),
+                key=key,
+                user_email=user_email,
+                user_role=user_role or LitellmUserRoles.INTERNAL_USER_VIEW_ONLY.value,
+                login_method="sso",
+                premium_user=premium_user,
+                auth_header_name=general_settings.get(
+                    "litellm_key_header_name", "Authorization"
+                ),
+                disabled_non_admin_personal_key_creation=disabled_non_admin_personal_key_creation,
+                server_root_path=get_server_root_path(),
+            )
+
+            jwt_token = jwt.encode(
+                cast(dict, returned_ui_token_object),
+                master_key or "",
+                algorithm="HS256",
+            )
+
+            litellm_dashboard_ui = get_custom_url(
+                request_base_url=str(request.base_url), route="ui/"
+            )
+            if response_user_id is not None and isinstance(response_user_id, str):
+                litellm_dashboard_ui += "?login=success"
+
+            verbose_proxy_logger.info(f"[飞书登录] 重定向到: {litellm_dashboard_ui}")
+            redirect_response = RedirectResponse(url=litellm_dashboard_ui, status_code=303)
+            redirect_response.set_cookie(key="token", value=jwt_token)
+            return redirect_response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        verbose_proxy_logger.exception(f"[飞书登录] 处理失败: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"飞书登录处理失败: {str(e)}"
+        )

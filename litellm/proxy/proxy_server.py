@@ -13654,6 +13654,7 @@ async def fallback_login(request: Request):
         content=build_ui_login_form(
             show_deprecation_banner=False,
             hide_default_credentials_hint=hide_default_credentials_hint,
+            base_url=str(request.base_url),
         ),
         status_code=200,
     )
