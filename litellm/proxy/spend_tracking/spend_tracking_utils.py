@@ -15,6 +15,7 @@ from litellm.constants import (
     LITELLM_TRUNCATED_PAYLOAD_FIELD,
     LITELLM_TRUNCATION_DB_SAFEGUARD_NOTE,
     REDACTED_BY_LITELM_STRING,
+    SPEND_LOGS_KEEP_METADATA_KEYS,
 )
 from litellm.constants import (
     MAX_STRING_LENGTH_PROMPT_IN_DB as DEFAULT_MAX_STRING_LENGTH_PROMPT_IN_DB,
@@ -144,6 +145,10 @@ def _get_spend_logs_metadata(
     clean_metadata["litellm_overhead_time_ms"] = litellm_overhead_time_ms
     clean_metadata["cost_breakdown"] = cost_breakdown
     clean_metadata["litellm_call_id"] = litellm_call_id
+
+    for key in list(clean_metadata.keys()):
+        if key not in SPEND_LOGS_KEEP_METADATA_KEYS:
+            del clean_metadata[key]
 
     return clean_metadata
 
@@ -368,29 +373,6 @@ def get_logging_payload(kwargs, response_obj, start_time, end_time) -> SpendLogs
     )
 
     special_usage_fields = ["completion_tokens", "prompt_tokens", "total_tokens"]
-    additional_usage_values = {}
-    for k, v in usage.items():
-        if k not in special_usage_fields:
-            if isinstance(v, BaseModel):
-                v = v.model_dump()
-            additional_usage_values.update({k: v})
-    prompt_tokens_details = additional_usage_values.get("prompt_tokens_details")
-    if not isinstance(prompt_tokens_details, dict):
-        usage_object = clean_metadata.get("usage_object")
-        if isinstance(usage_object, dict):
-            prompt_tokens_details = usage_object.get("prompt_tokens_details")
-    if isinstance(prompt_tokens_details, dict):
-        if "cache_read_input_tokens" not in additional_usage_values:
-            cached_tokens = prompt_tokens_details.get("cached_tokens")
-            if isinstance(cached_tokens, int) and cached_tokens > 0:
-                additional_usage_values["cache_read_input_tokens"] = cached_tokens
-        if "cache_creation_input_tokens" not in additional_usage_values:
-            cache_write_tokens = prompt_tokens_details.get("cache_write_tokens") or prompt_tokens_details.get(
-                "cache_creation_tokens"
-            )
-            if isinstance(cache_write_tokens, int) and cache_write_tokens > 0:
-                additional_usage_values["cache_creation_input_tokens"] = cache_write_tokens
-    clean_metadata["additional_usage_values"] = additional_usage_values
 
     if litellm.cache is not None:
         cache_key = litellm.cache.get_cache_key(**kwargs)
@@ -438,7 +420,7 @@ def get_logging_payload(kwargs, response_obj, start_time, end_time) -> SpendLogs
             model_id=_model_id,
             mcp_namespaced_tool_name=mcp_namespaced_tool_name,
             agent_id=agent_id,
-            requester_ip_address=clean_metadata.get("requester_ip_address", None),
+            requester_ip_address=metadata.get("requester_ip_address", None),
             custom_llm_provider=kwargs.get("custom_llm_provider", ""),
             messages=_get_messages_for_spend_logs_payload(
                 standard_logging_payload=standard_logging_payload, metadata=metadata
@@ -465,7 +447,7 @@ def get_logging_payload(kwargs, response_obj, start_time, end_time) -> SpendLogs
         )
 
         # Explicitly clear large intermediate objects to reduce memory pressure
-        del response_obj_dict, usage, clean_metadata, additional_usage_values
+        del response_obj_dict, usage, clean_metadata
 
         return payload
     except Exception as e:

@@ -1314,6 +1314,38 @@ LITELLM_TRUNCATION_DB_SAFEGUARD_NOTE = (
     "To increase the truncation limit, set `MAX_STRING_LENGTH_PROMPT_IN_DB` in your env."
 )
 
+SPEND_LOGS_KEEP_METADATA_KEYS = {
+    "additional_usage_values",
+    "user_api_key",
+    "user_api_key_alias",
+    "user_api_key_team_id",
+    "user_api_key_project_id",
+    "user_api_key_project_alias",
+    "user_api_key_org_id",
+    "user_api_key_user_id",
+    "user_api_key_team_alias",
+    "spend_logs_metadata",
+    "requester_ip_address",
+    "litellm_call_id",
+    "applied_guardrails",
+    "mcp_tool_call_metadata",
+    "vector_store_request_metadata",
+    "routing_decision",
+    "internal_call_origin",
+    "guardrail_information",
+    "eval_information",
+    "status",
+    "batch_models",
+    "error_information",
+    "usage_object",
+    "cold_storage_object_key",
+    "litellm_overhead_time_ms",
+    "attempted_retries",
+    "max_retries",
+    "cost_breakdown",
+    "compression_savings",
+}
+
 ########################### LiteLLM Proxy Specific Constants ###########################
 ########################################################################################
 
