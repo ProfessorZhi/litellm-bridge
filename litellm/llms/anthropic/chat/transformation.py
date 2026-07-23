@@ -666,7 +666,8 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         mcp_server: AnthropicMcpServerTool | None = None
 
         if tool["type"] == "function" or tool["type"] == "custom":
-            _input_schema = tool["function"].get(
+            _tool_key = "function" if "function" in tool else "custom"
+            _input_schema: dict = tool[_tool_key].get(
                 "parameters",
                 {
                     "type": "object",
@@ -677,12 +678,12 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             input_anthropic_schema = sanitize_input_schema_for_anthropic(_input_schema)
 
             _tool = AnthropicMessagesTool(
-                name=tool["function"]["name"],
+                name=tool[_tool_key]["name"],
                 input_schema=input_anthropic_schema,
                 type="custom",
             )
 
-            _description = tool["function"].get("description")
+            _description = tool[_tool_key].get("description")
             if _description is not None:
                 _tool["description"] = _description
 
@@ -1421,6 +1422,10 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 optional_params["max_tokens"] = value if isinstance(value, int) else max(1, int(round(value)))
             elif param == "tools":
                 anthropic_tools, mcp_servers = self._map_tools(value)
+                if "deepseek" in model.lower():
+                    for tool in anthropic_tools:
+                        if isinstance(tool, dict) and tool.get("type") == "custom":
+                            tool.pop("type", None)
                 optional_params = self._add_tools_to_optional_params(
                     optional_params=optional_params, tools=anthropic_tools
                 )
