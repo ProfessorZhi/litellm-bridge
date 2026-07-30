@@ -198,7 +198,7 @@ const CreateKey: React.FC<CreateKeyProps> = ({ team, teams, data, addKey, autoOp
   const [userSearchLoading, setUserSearchLoading] = useState<boolean>(false);
   const [mcpAccessGroups, setMcpAccessGroups] = useState<string[]>([]);
   const [disabledCallbacks, setDisabledCallbacks] = useState<string[]>([]);
-  const [keyType, setKeyType] = useState<string>("llm_api");
+  const [keyType, setKeyType] = useState<string>("default");
   const [modelAliases, setModelAliases] = useState<{ [key: string]: string }>({});
   const [autoRotationEnabled, setAutoRotationEnabled] = useState<boolean>(false);
   const [rotationInterval, setRotationInterval] = useState<string>("30d");
@@ -216,7 +216,7 @@ const CreateKey: React.FC<CreateKeyProps> = ({ team, teams, data, addKey, autoOp
     form.resetFields();
     setLoggingSettings([]);
     setDisabledCallbacks([]);
-    setKeyType("llm_api");
+    setKeyType("default");
     setModelAliases({});
     setAutoRotationEnabled(false);
     setRotationInterval("30d");
@@ -238,7 +238,7 @@ const CreateKey: React.FC<CreateKeyProps> = ({ team, teams, data, addKey, autoOp
     form.resetFields();
     setLoggingSettings([]);
     setDisabledCallbacks([]);
-    setKeyType("llm_api");
+    setKeyType("default");
     setModelAliases({});
     setAutoRotationEnabled(false);
     setRotationInterval("30d");
@@ -997,11 +997,11 @@ const CreateKey: React.FC<CreateKeyProps> = ({ team, teams, data, addKey, autoOp
                   </span>
                 }
                 name="key_type"
-                initialValue="llm_api"
+                initialValue="default"
                 className="mt-4"
               >
                 <Select
-                  defaultValue="llm_api"
+                  defaultValue="default"
                   placeholder="Select key type"
                   style={{ width: "100%" }}
                   optionLabelProp="label"
@@ -1013,11 +1013,11 @@ const CreateKey: React.FC<CreateKeyProps> = ({ team, teams, data, addKey, autoOp
                     }
                   }}
                 >
-                  <Option value="llm_api" label="AI APIs">
+                  <Option value="default" label="Full Access">
                     <div style={{ padding: "4px 0" }}>
-                      <Typography.Text strong>AI APIs</Typography.Text>
+                      <Typography.Text strong>Full Access</Typography.Text>
                       <Typography.Paragraph type="secondary" style={{ fontSize: 11, margin: "2px 0 0" }}>
-                        Can call only AI API routes (chat/completions, embeddings, etc.)
+                        Can call all routes (AI APIs, Management, and read-only)
                       </Typography.Paragraph>
                     </div>
                   </Option>
@@ -1029,11 +1029,11 @@ const CreateKey: React.FC<CreateKeyProps> = ({ team, teams, data, addKey, autoOp
                       </Typography.Paragraph>
                     </div>
                   </Option>
-                  <Option value="default" label="Full Access">
+                  <Option value="llm_api" label="AI APIs">
                     <div style={{ padding: "4px 0" }}>
-                      <Typography.Text strong>Full Access</Typography.Text>
+                      <Typography.Text strong>AI APIs</Typography.Text>
                       <Typography.Paragraph type="secondary" style={{ fontSize: 11, margin: "2px 0 0" }}>
-                        Can call all routes (AI APIs, Management, and read-only)
+                        Can call only AI API routes (chat/completions, embeddings, etc.)
                       </Typography.Paragraph>
                     </div>
                   </Option>
