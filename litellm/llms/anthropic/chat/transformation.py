@@ -1901,6 +1901,13 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         tools = self.add_code_execution_tool(messages=anthropic_messages, tools=_tools)
         if len(tools) > 1:
             optional_params["tools"] = tools
+        # Strip type:custom for DeepSeek Anthropic endpoint compatibility.
+        # DeepSeek Anthropic API only accepts web_search_20250305 and
+        # web_search_20260209 discriminators, rejecting type:custom.
+        if optional_params.get("tools") and "deepseek" in model.lower():
+            for tool in optional_params["tools"]:
+                if isinstance(tool, dict) and tool.get("type") == "custom":
+                    tool.pop("type", None)
 
         ## Load Config
         config = litellm.AnthropicConfig.get_config(model=model)

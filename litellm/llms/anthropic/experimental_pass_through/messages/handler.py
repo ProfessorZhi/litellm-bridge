@@ -255,6 +255,12 @@ async def anthropic_messages(
     # overrides and (b) avoid duplicate-keyword conflicts when splatting `kwargs`
     # into call sites that already pass these as named arguments.
     tools = request_kwargs.pop("tools", tools)
+    # Strip type:custom for DeepSeek Anthropic endpoint compatibility
+    # Only web_search_20250305 and web_search_20260209 are accepted
+    if tools and model and "deepseek" in model.lower():
+        for tool in tools:
+            if isinstance(tool, dict) and tool.get("type") == "custom":
+                tool.pop("type", None)
     stream = request_kwargs.pop("stream", stream)
     metadata = request_kwargs.pop("metadata", metadata)
     stop_sequences = request_kwargs.pop("stop_sequences", stop_sequences)
