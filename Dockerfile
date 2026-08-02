@@ -80,7 +80,8 @@ COPY --from=ui-builder /ui/out/. litellm/proxy/_experimental/out/
 RUN sed -i 's/\r$//' docker/build_admin_ui.sh && chmod +x docker/build_admin_ui.sh && ./docker/build_admin_ui.sh
 
 # Install project and workspace packages (fast - deps already cached)
-RUN uv sync --frozen --no-default-groups --no-editable \
+RUN echo "BUILD DEBUG: checking source..." && grep -n "can_skip_admin_check" litellm/proxy/management_endpoints/key_management_endpoints.py
+RUN uv sync --frozen --no-default-groups --no-editable --reinstall-package litellm \
     --extra proxy \
     --extra proxy-runtime \
     --extra extra_proxy \
