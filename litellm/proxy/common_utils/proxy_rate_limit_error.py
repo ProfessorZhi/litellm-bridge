@@ -163,9 +163,10 @@ class ProxyRateLimitError(HTTPException, RateLimitError):  # type: ignore[misc]
         # Initialize the FastAPI HTTPException portion first so its attributes
         # (status_code, detail, headers) are already on the instance before
         # RateLimitError.__init__ runs and possibly overrides them.
+        _status_code = 402 if rate_limit_type == RateLimitType.BUDGET else 429
         HTTPException.__init__(
             self,
-            status_code=429,
+            status_code=_status_code,
             detail=detail,
             headers=stringified_headers,
         )
