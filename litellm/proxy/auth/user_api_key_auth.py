@@ -1842,7 +1842,7 @@ async def _user_api_key_auth_builder(
                     )
 
                     # Check 5. Token Spend is under budget
-                    if RouteChecks.is_llm_api_route(route=route):
+                    if RouteChecks.is_llm_api_route(route=route) and route not in LiteLLMRoutes.admin_viewer_routes.value:
                         await _virtual_key_max_budget_check(
                             valid_token=valid_token,
                             proxy_logging_obj=proxy_logging_obj,

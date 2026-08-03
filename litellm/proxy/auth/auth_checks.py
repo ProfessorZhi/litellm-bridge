@@ -534,7 +534,7 @@ async def common_checks(
         request=request,
     )
 
-    if route in MODEL_DISCOVERY_ROUTES:
+    if _model is None or route in MODEL_DISCOVERY_ROUTES or route in LiteLLMRoutes.admin_viewer_routes.value:
         skip_budget_checks = True
 
     # 1. If team is blocked
