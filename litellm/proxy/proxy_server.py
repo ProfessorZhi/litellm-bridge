@@ -11417,6 +11417,20 @@ async def _populate_team_access_on_models(
     if user_api_key_dict.user_role == LitellmUserRoles.PROXY_ADMIN:
         user_teams = "*"
         direct_access_models = llm_router.get_model_ids(exclude_team_models=True)  # has access to all models
+    elif user_api_key_dict.user_role in [
+        LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY,
+        LitellmUserRoles.INTERNAL_USER,
+        LitellmUserRoles.INTERNAL_USER_VIEW_ONLY,
+    ]:
+        # Non-admin roles that can view all models (read-only)
+        direct_access_models = llm_router.get_model_ids(exclude_team_models=True)
+        if user_api_key_dict.user_id is not None:
+            user_db_object = await UserRepository(prisma_client).table.find_unique(
+                where={"user_id": user_api_key_dict.user_id}
+            )
+            if user_db_object is not None:
+                user_object = LiteLLM_UserTable(**user_db_object.model_dump())
+                user_teams = user_object.teams or []
     elif user_api_key_dict.user_id is not None:
         user_db_object = await UserRepository(prisma_client).table.find_unique(
             where={"user_id": user_api_key_dict.user_id}
