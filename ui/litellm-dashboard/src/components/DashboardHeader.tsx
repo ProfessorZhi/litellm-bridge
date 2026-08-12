@@ -11,6 +11,7 @@ import {
 import { ToolbarSeparator } from "@/components/shared/ToolbarSeparator";
 import { getBreadcrumb } from "@/components/leftnav";
 import { BlogDropdown } from "@/components/Navbar/BlogDropdown/BlogDropdown";
+import { GuideButtons } from "@/components/Navbar/GuideButtons/GuideButtons";
 import { CommunityEngagementButtons } from "@/components/Navbar/CommunityEngagementButtons/CommunityEngagementButtons";
 import { NotificationsBell } from "@/components/Navbar/NotificationsBell/NotificationsBell";
 import ViewSwitcher from "@/components/Navbar/ViewSwitcher";
@@ -61,6 +62,7 @@ export function DashboardHeader({ page }: DashboardHeaderProps) {
             <ToolbarSeparator />
           </>
         )}
+        <GuideButtons />
         <Button
           variant="ghost"
           size="sm"

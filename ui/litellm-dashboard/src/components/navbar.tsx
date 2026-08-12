@@ -13,6 +13,7 @@ import { Tag } from "antd";
 import Link from "next/link";
 import React from "react";
 import { BlogDropdown } from "./Navbar/BlogDropdown/BlogDropdown";
+import { GuideButtons } from "./Navbar/GuideButtons/GuideButtons";
 import { CommunityEngagementButtons } from "./Navbar/CommunityEngagementButtons/CommunityEngagementButtons";
 import { NAV_PRODUCT_LINK_CLASS } from "./Navbar/navProductLinkClass";
 import { NotificationsBell } from "./Navbar/NotificationsBell/NotificationsBell";
@@ -130,6 +131,7 @@ const Navbar: React.FC<NavbarProps> = ({
               aria-label="Product documentation"
               className={`flex min-w-0 items-center gap-2 ${showWorkerSwitch ? "border-l border-gray-200 pl-4" : ""}`}
             >
+              <GuideButtons />
               <a
                 href="https://docs.litellm.ai/docs/"
                 target="_blank"
