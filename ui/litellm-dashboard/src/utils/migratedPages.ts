@@ -21,6 +21,7 @@ export const MIGRATED_PAGES: Record<string, string> = {
   budgets: "budgets",
   workflows: "workflows",
   "guardrails-monitor": "guardrails-monitor",
+  "channel-monitor": "channel-monitor",
   "mcp-servers": "mcp-servers",
   "search-tools": "search-tools",
   "tag-management": "tag-management",

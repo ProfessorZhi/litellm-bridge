@@ -528,6 +528,7 @@ from litellm.proxy.spend_tracking.budget_reservation import get_budget_window_st
 from litellm.proxy.spend_tracking.spend_management_endpoints import (
     router as spend_management_router,
 )
+from litellm.proxy.management_endpoints.monitor_management_endpoints import router as monitor_management_router
 from litellm.proxy.spend_tracking.spend_tracking_utils import get_logging_payload
 from litellm.proxy.types_utils.utils import get_instance_fn
 from litellm.proxy.ui_crud_endpoints.proxy_setting_endpoints import (
@@ -16472,6 +16473,7 @@ app.include_router(organization_router)
 app.include_router(customer_router)
 app.include_router(management_v1_router)
 app.include_router(spend_management_router)
+app.include_router(monitor_management_router)
 app.include_router(caching_router)
 app.include_router(analytics_router)
 app.include_router(callback_management_endpoints_router)

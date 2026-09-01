@@ -24,6 +24,7 @@ import {
 import {
   Activity,
   BarChart3,
+  Gauge,
   Bell,
   Blocks,
   Bot,
@@ -183,6 +184,14 @@ const menuGroups: MenuGroup[] = [
         label: "Usage",
       },
       {
+        key: "channel-monitor",
+        page: "channel-monitor",
+        label: "模型监控",
+        icon: <Gauge {...ICON} />,
+        roles: [...all_admin_roles, ...internalUserRoles],
+      },
+      { key: "logs", page: "logs", label: "Logs", icon: <Activity {...ICON} /> },
+      {
         key: "cost-optimization",
         page: "cost-optimization",
         icon: <PiggyBank {...ICON} />,
@@ -193,7 +202,6 @@ const menuGroups: MenuGroup[] = [
           </span>
         ),
       },
-      { key: "logs", page: "logs", label: "Logs", icon: <Activity {...ICON} /> },
       {
         key: "guardrails-monitor",
         page: "guardrails-monitor",
@@ -532,7 +540,15 @@ const Sidebar_: React.FC<SidebarProps> = ({
         onClick={(e) => handleLeafClick(e, item)}
         title={collapsed ? labelText(item) : undefined}
         data-active={active || undefined}
-        className={cn(sidebarMenuButtonVariants({ isActive: active, size }))}
+        className={cn(
+          sidebarMenuButtonVariants({ isActive: active, size }),
+          item.key === "channel-monitor" &&
+            cn(
+              "bg-amber-500/20 text-amber-900 font-semibold hover:bg-amber-500/30",
+              active &&
+                "before:absolute before:inset-y-1.5 before:left-0 before:w-[3px] before:rounded-r-full before:!bg-amber-500"
+            )
+        )}
       >
         {item.icon}
         {label}

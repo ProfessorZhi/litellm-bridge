@@ -278,6 +278,9 @@ class RouteChecks:
             and "get_spend_routes" in getattr(valid_token, "permissions", [])
         ):
             pass
+        elif route == "/monitor/channel-summary":
+            # 渠道健康度：任何登录用户可看（渠道监控页面）
+            pass
         elif _user_role == LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value:
             RouteChecks._check_proxy_admin_viewer_access(
                 route=route,
