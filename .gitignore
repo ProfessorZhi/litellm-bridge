@@ -142,3 +142,24 @@ crash.*.log
 
 ui/litellm-dashboard/out/
 litellm.log
+
+# runtime prisma migrations/schema (来自容器, 非源)
+prisma/
+
+# 测试服本地配置 & 测试(不进 git, 与官方 litellm/tests 无关)
+config-06-prod.yaml
+config-06-prod.yaml.tmp
+config.test.yaml
+config.min.yaml
+docker-compose.test.yaml
+queue/
+
+# 本地备份文件
+*.bak-*
+
+# 测试件(仓库 root 下新增的 .test / tests)
+**/*.test.ts
+**/*.test.tsx
+**/*.test.js
+**/*.test.jsx
+tests/
