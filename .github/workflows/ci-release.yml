@@ -1,0 +1,196 @@
+name: "Enterprise Release CI"
+
+# 只在推版本 tag(v*)时触发 —— 合入 dev 不跑
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ============ 1. 后端代码风格 (ruff) ============
+  lint:
+    name: "Lint (ruff, 全量)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-uv-with-retries
+        with:
+          version: "0.10.9"
+      - name: Clean python cache
+        run: |
+          find . -type d -name "__pycache__" -exec rm -rf {} + || true
+          find . -name "*.pyc" -delete || true
+      - name: uv.lock 一致性
+        run: uv lock --check || (echo "❌ uv.lock out of sync. Run 'uv lock' locally and commit." && exit 1)
+      - name: Install dependencies
+        run: uv sync --frozen --group proxy-dev --group e2e-dev
+      - name: Generate Prisma client
+        env:
+          PRISMA_BINARY_CACHE_DIR: ${{ runner.temp }}/prisma-cache
+        run: uv run --no-sync prisma generate --schema litellm/proxy/schema.prisma
+      - name: Ruff format check
+        run: |
+          cd litellm && uv run --no-sync ruff format --check . ; cd ..
+      - name: Ruff check
+        run: |
+          cd litellm && uv run --no-sync ruff check . ; cd ..
+
+  # ============ 2. 后端单测 (含监控) ============
+  backend-unit:
+    name: "后端单测 (pytest, 含监控)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-uv-with-retries
+        with:
+          version: "0.10.9"
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+            .venv
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
+      - name: Install dependencies
+        run: ./.github/scripts/uv_sync_with_retries.sh --frozen --group ci --group proxy-dev --extra google --extra proxy --extra semantic-router --extra saml
+      - name: Generate Prisma client
+        env:
+          PRISMA_BINARY_CACHE_DIR: ${{ runner.temp }}/prisma-cache
+        run: uv run --no-sync prisma generate --schema litellm/proxy/schema.prisma
+      - name: Run tests (management_endpoints, 含监控)
+        run: |
+          uv run --no-sync pytest tests/test_litellm/proxy/management_endpoints/management_v1 \
+            --tb=short -vv --maxfail=10 -n 2 --reruns 2 --reruns-delay 1 --durations=20
+
+  # ============ 3. 前端 build ============
+  ui-build:
+    name: "前端 UI build"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui/litellm-dashboard
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ui/litellm-dashboard/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+
+  # ============ 4. 前端 lint (全量 prettier + eslint) ============
+  ui-lint:
+    name: "前端 lint (prettier + eslint)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui/litellm-dashboard
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ui/litellm-dashboard/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Prettier check (全量)
+        run: npx prettier --check "src/**/*.{ts,tsx,js,jsx}" || (echo "❌ 有未格式化的前端文件, 运行 npm run format" && exit 1)
+      - name: ESLint (全量)
+        run: npx eslint "src/**/*.{ts,tsx,js,jsx}" || (echo "❌ ESLint 有报错" && exit 1)
+
+  # ============ 5. 前端单测 (Vitest) ============
+  ui-unit:
+    name: "前端单测 (Vitest)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ui/litellm-dashboard
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ui/litellm-dashboard/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Run Vitest
+        env:
+          CI: "true"
+        run: npm run test -- --run --pool forks
+
+  # ============ 6. 前后端类型一致性 ============
+  api-types:
+    name: "API 类型一致性 (schema.d.ts)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/setup-uv-with-retries
+        with:
+          version: "0.10.9"
+      - name: Install backend deps
+        run: ./.github/scripts/uv_sync_with_retries.sh --frozen --group ci --group proxy-dev --extra google --extra proxy --extra semantic-router
+      - name: Generate Prisma client
+        env:
+          PRISMA_BINARY_CACHE_DIR: ${{ runner.temp }}/prisma-cache
+        run: uv run --no-sync prisma generate --schema litellm/proxy/schema.prisma
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: ui/litellm-dashboard/package-lock.json
+      - name: Install dashboard deps
+        working-directory: ui/litellm-dashboard
+        run: npm ci
+      - name: Regenerate types from live spec
+        working-directory: ui/litellm-dashboard
+        env:
+          LITELLM_PYTHON: "uv run --no-sync python"
+        run: npm run gen:api
+      - name: Fail if types are stale
+        run: |
+          if ! git diff --exit-code -- ui/litellm-dashboard/src/lib/http/schema.d.ts; then
+            echo "::error file=ui/litellm-dashboard/src/lib/http/schema.d.ts::Generated API types out of sync with proxy OpenAPI spec. 运行: npm run gen:api"
+            exit 1
+          fi
