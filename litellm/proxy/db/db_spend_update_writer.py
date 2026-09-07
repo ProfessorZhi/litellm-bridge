@@ -55,6 +55,7 @@ from litellm.proxy.db.db_transaction_queue.tool_discovery_queue import (
     ToolDiscoveryQueue,
 )
 from litellm.proxy.route_llm_request import ROUTE_ENDPOINT_MAPPING
+from litellm.proxy.spend_tracking.cache_token_utils import extract_cache_read_tokens
 from litellm.proxy.spend_tracking.compression_savings import (
     extract_compression_saved_tokens,
 )
@@ -66,18 +67,6 @@ if TYPE_CHECKING:
 else:
     PrismaClient = Any
     ProxyLogging = Any
-
-
-def _extract_cache_read_tokens(usage_obj: dict) -> int:
-    """
-    Anthropic: top-level cache_read_input_tokens field.
-    OpenAI-compatible (moonshotai, openai, deepseek, etc.): prompt_tokens_details.cached_tokens.
-    """
-    explicit = usage_obj.get("cache_read_input_tokens", 0) or 0
-    if explicit:
-        return int(explicit)
-    details = usage_obj.get("prompt_tokens_details") or {}
-    return int(details.get("cached_tokens", 0) or 0)
 
 
 def _extract_cache_creation_tokens(usage_obj: dict) -> int:
@@ -1868,7 +1857,7 @@ class DBSpendUpdateWriter:
             if call_type:
                 endpoint = ROUTE_ENDPOINT_MAPPING.get(call_type, None)
 
-            cache_read_input_tokens = _extract_cache_read_tokens(usage_obj)
+            cache_read_input_tokens = extract_cache_read_tokens(usage_obj)
             compression_saved_tokens = extract_compression_saved_tokens(_metadata)
             savings_spend = compute_savings_spend(
                 model=payload.get("model", None),
