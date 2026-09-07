@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+from pathlib import Path
+import re
 
 import litellm
 
@@ -66,3 +68,24 @@ def test_spend_log_model_exposes_cache_read_tokens():
     )
 
     assert row.cache_read_input_tokens == 23
+
+
+def test_all_prisma_schemas_persist_cache_read_input_tokens():
+    repo_root = Path(__file__).resolve().parents[2]
+    schema_paths = [
+        repo_root / "schema.prisma",
+        repo_root / "litellm" / "proxy" / "schema.prisma",
+        repo_root
+        / "litellm-proxy-extras"
+        / "litellm_proxy_extras"
+        / "schema.prisma",
+    ]
+
+    for schema_path in schema_paths:
+        match = re.search(
+            r"^model LiteLLM_SpendLogs \{(?P<body>.*?)^\}",
+            schema_path.read_text(),
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        assert match is not None, schema_path
+        assert "cache_read_input_tokens" in match.group("body"), schema_path
