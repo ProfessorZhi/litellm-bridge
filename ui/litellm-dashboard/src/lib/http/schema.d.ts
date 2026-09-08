@@ -26414,6 +26414,11 @@ export interface components {
             cache_hit: string | null;
             /** Cache Key */
             cache_key?: string | null;
+            /**
+             * Cache Read Input Tokens
+             * @default 0
+             */
+            cache_read_input_tokens: number | null;
             /** Call Type */
             call_type: string;
             /**
