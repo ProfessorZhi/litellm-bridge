@@ -20,7 +20,7 @@ import secrets
 import traceback
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal, Optional, Protocol, TypeVar, cast
+from typing import Any, Literal, Optional, Protocol, TypeVar, Union, cast
 
 import fastapi
 import yaml
