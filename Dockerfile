@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1.7
 
 # Base image for building
-ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:103eb3f4444c68ea2453bf3aad09d860eaa5a698effb3e656cd607f630f0e46d
+ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:e624c5d5e42382ce7165ddafcbbf8e6769a24cbd02ea6114b880b05ae5ba2a8d
 
 # Runtime image
-ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:103eb3f4444c68ea2453bf3aad09d860eaa5a698effb3e656cd607f630f0e46d
+ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/wolfi-base@sha256:e624c5d5e42382ce7165ddafcbbf8e6769a24cbd02ea6114b880b05ae5ba2a8d
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a
 # Pinned by digest like the other base images; bump explicitly on Node upgrades.
-ARG UI_BUILD_IMAGE=node:20.18-alpine3.20@sha256:3488b10bf958af7125a176419d2d8a9937d895bf124012aae811651988d2ffe6
+ARG UI_BUILD_IMAGE=node:24.19-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
 
 FROM $UV_IMAGE AS uvbin
 
@@ -40,8 +40,8 @@ COPY --from=uvbin /uvx /usr/local/bin/uvx
 RUN apk add --no-cache \
     bash \
     gcc \
-    python3 \
-    python3-dev \
+    python-3.13 \
+    python-3.13-dev \
     rust \
     openssl \
     openssl-dev \
@@ -51,6 +51,7 @@ RUN apk add --no-cache \
 
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0 \
     PATH="/app/.venv/bin:${PATH}"
 
 # Copy dependency metadata first for layer caching
@@ -65,7 +66,7 @@ RUN uv sync --frozen --no-install-project --no-install-workspace --no-default-gr
     --extra extra_proxy \
     --extra semantic-router \
     --extra saml \
-    --python python3
+    --python python3.13
 
 # Copy full source tree
 COPY . .
@@ -80,14 +81,13 @@ COPY --from=ui-builder /ui/out/. litellm/proxy/_experimental/out/
 RUN sed -i 's/\r$//' docker/build_admin_ui.sh && chmod +x docker/build_admin_ui.sh && ./docker/build_admin_ui.sh
 
 # Install project and workspace packages (fast - deps already cached)
-RUN echo "BUILD DEBUG: checking source..." && grep -n "can_skip_admin_check" litellm/proxy/management_endpoints/key_management_endpoints.py
-RUN uv sync --frozen --no-default-groups --no-editable --reinstall-package litellm \
+RUN uv sync --frozen --no-default-groups --no-editable \
     --extra proxy \
     --extra proxy-runtime \
     --extra extra_proxy \
     --extra semantic-router \
     --extra saml \
-    --python python3
+    --python python3.13
 
 RUN HOME=/opt/prisma XDG_CACHE_HOME=/opt/prisma/.cache PRISMA_BINARY_CACHE_DIR=/opt/prisma/binaries \
     npm_config_cache=/root/.npm \
@@ -102,7 +102,7 @@ FROM $LITELLM_RUNTIME_IMAGE AS runtime
 USER root
 
 # node (without npm) is required by the prisma CLI at runtime
-RUN apk add --no-cache bash openssl tzdata nodejs python3 libsndfile
+RUN apk add --no-cache bash openssl tzdata nodejs python-3.13 libsndfile
 
 WORKDIR /app
 ENV PATH="/app/.venv/bin:${PATH}" \
@@ -124,9 +124,6 @@ COPY --from=builder /app/litellm/proxy/prisma_migration.py /app/litellm/proxy/pr
 # enterprise.enterprise_hooks from it)
 COPY --from=builder /app/enterprise /app/enterprise
 COPY --from=builder /app/litellm-proxy-extras /app/litellm-proxy-extras
-# custom_callbacks.py is a repo-root file (not in the venv); the dotted-path
-# callback custom_callbacks.spendlog_elk_* needs it importable from /app.
-COPY --from=builder /app/custom_callbacks.py /app/custom_callbacks.py
 # Prisma CLI + engines are baked under /opt/prisma, a fixed path every
 # runtime uid can read and that no cache volume mount shadows. The paths are
 # pinned via PRISMA_BINARY_CACHE_DIR / PRISMA_CLI_PATH and recorded into the
@@ -138,7 +135,8 @@ RUN find /app/.venv -type f -path "*/tornado/test/*" -delete && \
     find /app/.venv -type d -path "*/tornado/test" -delete && \
     chmod -R a+rX /opt/prisma && \
     test -x /opt/prisma/binaries/node_modules/.bin/prisma && \
-    test -f /opt/prisma/binaries/node_modules/prisma/build/index.js
+    test -f /opt/prisma/binaries/node_modules/prisma/build/index.js && \
+    python -c "from prisma.client import BINARY_PATHS; paths = list(BINARY_PATHS.query_engine.values()); assert paths and all(p.startswith('/opt/prisma/') for p in paths), paths"
 
 EXPOSE 4000/tcp
 

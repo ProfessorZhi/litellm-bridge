@@ -1,13 +1,14 @@
 import os
+from typing import Final
 
 from litellm.proxy.utils import get_custom_url
 
 url_to_redirect_to = os.getenv("PROXY_BASE_URL", "")
-server_root_path = os.getenv("SERVER_ROOT_PATH", "")
+server_root_path: Final = os.getenv("SERVER_ROOT_PATH", "")
 if server_root_path != "":
     url_to_redirect_to += server_root_path
 url_to_redirect_to += "/login"
-new_ui_login_url = get_custom_url("", "ui/login")
+new_ui_login_url: Final = get_custom_url("", "ui/login")
 
 
 def build_ui_login_form(
@@ -21,7 +22,7 @@ def build_ui_login_form(
         f"?redirect_uri={base_url}sso/feishu/callback"
         f"&app_id={feishu_app_id}"
     ) if feishu_app_id else ""
-    banner_html = (
+    banner_html: Final = (
         f"""
         <div class="deprecation-banner">
             <strong>Deprecated:</strong> Logging in with username and password on this page is deprecated.
@@ -35,7 +36,7 @@ def build_ui_login_form(
 
     # LITELLM-UI-001: 默认凭据提示 → 替换为三个飞书配置教程链接
     # （URL 与登录后首页顶部 GuideButtons 一致，fjdynamics 飞书 wiki）
-    info_box_html = (
+    info_box_html: Final = (
         ""
         if hide_default_credentials_hint
         else """

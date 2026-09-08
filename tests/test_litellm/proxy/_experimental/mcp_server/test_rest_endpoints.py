@@ -1,8 +1,12 @@
 import asyncio
 import json
+import sys
 from datetime import datetime
 from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock
+
+if sys.version_info < (3, 11):  # BaseExceptionGroup is a builtin only from 3.11
+    from exceptiongroup import BaseExceptionGroup
 
 import httpx
 import pytest
@@ -20,6 +24,12 @@ from litellm.proxy._types import (
 )
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
 from litellm.types.mcp import MCPAuth
+
+
+def _rendered_log_message(call):
+    message = str(call.args[0])
+    values = call.args[1:]
+    return message % values if values else message
 
 
 def _build_request(
@@ -786,7 +796,7 @@ class TestListToolsRestAPI:
             return admitted_auth
 
         monkeypatch.setattr(
-            "litellm.proxy._experimental.mcp_server.auth.user_api_key_auth_mcp.MCPRequestHandler._reload_admitted_user",
+            "litellm.proxy._experimental.mcp_server.auth.user_api_key_auth_mcp.MCPRequestHandler.reload_admitted_user",
             fake_reload,
         )
 
@@ -902,7 +912,7 @@ class TestListToolsRestAPI:
             return ["toolset-tool-1"]
 
         monkeypatch.setattr(
-            "litellm.proxy._experimental.mcp_server.auth.user_api_key_auth_mcp.MCPRequestHandler._reload_admitted_user",
+            "litellm.proxy._experimental.mcp_server.auth.user_api_key_auth_mcp.MCPRequestHandler.reload_admitted_user",
             record_reload,
         )
         monkeypatch.setattr(
@@ -2048,9 +2058,9 @@ class TestCallToolRestAPI:
         assert exc_info.value.headers.get("www-authenticate") == challenge
         # The expected caller-must-reauth signal is logged once, at info, and never at error, so
         # error-rate alerts do not fire on normal pass-through re-authentication.
-        error_messages = [str(c.args[0]) for c in mock_logger.error.call_args_list if c.args]
+        error_messages = [_rendered_log_message(c) for c in mock_logger.error.call_args_list if c.args]
         assert not any("MCP tool call" in m for m in error_messages)
-        info_messages = [str(c.args[0]) for c in mock_logger.info.call_args_list if c.args]
+        info_messages = [_rendered_log_message(c) for c in mock_logger.info.call_args_list if c.args]
         assert sum(str(upstream_status) in m for m in info_messages) == 1
 
     async def test_local_permission_denial_keeps_error_level_logging(self, monkeypatch):
@@ -2112,9 +2122,9 @@ class TestCallToolRestAPI:
             await rest_endpoints.call_tool_rest_api(request, user_api_key_dict=UserAPIKeyAuth())
 
         assert exc_info.value.status_code == 403
-        error_messages = [str(c.args[0]) for c in mock_logger.error.call_args_list if c.args]
+        error_messages = [_rendered_log_message(c) for c in mock_logger.error.call_args_list if c.args]
         assert any("HTTPException in MCP tool call" in m for m in error_messages)
-        info_messages = [str(c.args[0]) for c in mock_logger.info.call_args_list if c.args]
+        info_messages = [_rendered_log_message(c) for c in mock_logger.info.call_args_list if c.args]
         assert not any("relaying upstream" in m for m in info_messages)
 
     async def test_success_logging_cancellation_propagates(self, monkeypatch):
