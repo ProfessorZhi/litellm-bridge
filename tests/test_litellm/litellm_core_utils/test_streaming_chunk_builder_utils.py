@@ -592,6 +592,58 @@ def test_stream_chunk_builder_litellm_usage_chunks():
     assert usage.total_tokens == 77
 
 
+def test_stream_chunk_builder_preserves_openai_sdk_usage_details():
+    from openai.types.completion_usage import (
+        CompletionTokensDetails,
+        CompletionUsage,
+        PromptTokensDetails,
+    )
+
+    provider_chunk = ModelResponseStream(
+        id="chatcmpl-openai-sdk-usage",
+        created=1745513206,
+        model="deepseek-v4-flash",
+        object="chat.completion.chunk",
+        system_fingerprint=None,
+        choices=[
+            StreamingChoices(
+                finish_reason="stop",
+                index=0,
+                delta=Delta(content="done", role="assistant"),
+                logprobs=None,
+            )
+        ],
+        provider_specific_fields=None,
+        stream_options={"include_usage": True},
+    )
+    provider_chunk.usage = CompletionUsage(
+        prompt_tokens=1000,
+        completion_tokens=100,
+        total_tokens=1100,
+        prompt_tokens_details=PromptTokensDetails(
+            audio_tokens=0,
+            cached_tokens=800,
+        ),
+        completion_tokens_details=CompletionTokensDetails(
+            reasoning_tokens=40,
+        ),
+    )
+
+    assembled = stream_chunk_builder(
+        chunks=[provider_chunk],
+        messages=[{"role": "user", "content": "cached prompt"}],
+    )
+
+    assert assembled is not None
+    assert assembled.usage.prompt_tokens == 1000
+    assert assembled.usage.completion_tokens == 100
+    assert assembled.usage.total_tokens == 1100
+    assert assembled.usage.prompt_tokens_details is not None
+    assert assembled.usage.prompt_tokens_details.cached_tokens == 800
+    assert assembled.usage.completion_tokens_details is not None
+    assert assembled.usage.completion_tokens_details.reasoning_tokens == 40
+
+
 def test_get_model_from_chunks_azure_model_router():
     """
     Test that _get_model_from_chunks finds the actual model from Azure Model Router chunks.
