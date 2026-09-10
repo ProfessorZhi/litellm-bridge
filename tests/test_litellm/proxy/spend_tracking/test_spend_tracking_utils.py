@@ -15,6 +15,8 @@ from litellm.constants import (
     REDACTED_BY_LITELM_STRING,
 )
 from litellm.litellm_core_utils.safe_json_dumps import safe_dumps
+from litellm.proxy._types import SpendLogsPayload
+from litellm.proxy.spend_tracking.savings import extract_cache_read_tokens
 from litellm.proxy.spend_tracking.spend_tracking_utils import (
     _get_messages_for_spend_logs_payload,
     _get_proxy_server_request_for_spend_logs_payload,
@@ -263,6 +265,56 @@ def test_get_logging_payload_maps_responses_api_cache_write_tokens_from_usage_ob
     )
     additional_usage_values = json.loads(payload["metadata"])["additional_usage_values"]
     assert additional_usage_values["cache_creation_input_tokens"] == 800
+
+
+def _get_spend_log_payload_for_usage_object(usage_object: dict) -> SpendLogsPayload:
+    return get_logging_payload(
+        kwargs={
+            "model": "gpt-5.6",
+            "call_type": "responses",
+            "litellm_params": {"metadata": {"user_api_key": "test-key"}},
+            "standard_logging_object": _make_standard_logging_payload_with_usage_object(usage_object),
+        },
+        response_obj={
+            "id": "resp-test",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 10,
+                "total_tokens": 1010,
+                "input_tokens_details": {"cached_tokens": 0},
+            },
+        },
+        start_time=datetime.datetime.now(timezone.utc),
+        end_time=datetime.datetime.now(timezone.utc),
+    )
+
+
+@pytest.mark.parametrize(
+    "usage_object, expected_cache_read_tokens",
+    [
+        ({"prompt_tokens": 1000, "cache_read_input_tokens": 41}, 41),
+        ({"prompt_tokens": 1000, "prompt_tokens_details": {"cached_tokens": 37}}, 37),
+        ({"prompt_tokens": 1000}, 0),
+    ],
+)
+def test_get_logging_payload_persists_cache_read_input_tokens(usage_object, expected_cache_read_tokens):
+    """A SpendLogs row carries the cache-read token count on the row itself, so the
+    per-request API and dashboard can read it without parsing the metadata blob."""
+    payload = _get_spend_log_payload_for_usage_object(usage_object)
+
+    assert payload["cache_read_input_tokens"] == expected_cache_read_tokens
+
+
+def test_spend_log_cache_read_input_tokens_agrees_with_the_daily_rollup_source():
+    """The daily aggregate writer reads the usage object recorded in the row's own
+    metadata. Deriving the per-request column from anything else (the flattened
+    additional_usage_values, say) lets a request's SpendLogs row and the daily
+    rollup disagree about that same request."""
+    usage_object = {"prompt_tokens": 1000, "cache_read_input_tokens": 41}
+    payload = _get_spend_log_payload_for_usage_object(usage_object)
+    recorded_usage_object = json.loads(payload["metadata"])["usage_object"]
+
+    assert payload["cache_read_input_tokens"] == extract_cache_read_tokens(recorded_usage_object) == 41
 
 
 def test_sanitize_request_body_for_spend_logs_payload_basic():

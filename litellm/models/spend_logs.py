@@ -23,6 +23,7 @@ class LiteLLM_SpendLogs(LiteLLMPydanticObjectBase):
     total_tokens: int | None = 0
     prompt_tokens: int | None = 0
     completion_tokens: int | None = 0
+    cache_read_input_tokens: int | None = 0
     startTime: str | datetime | None
     endTime: str | datetime | None
     user: str | None = ""
