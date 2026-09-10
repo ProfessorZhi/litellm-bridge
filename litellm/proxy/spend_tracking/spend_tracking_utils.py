@@ -510,7 +510,7 @@ def get_logging_payload(kwargs, response_obj, start_time, end_time) -> SpendLogs
             total_tokens=usage.get("total_tokens", standard_logging_total_tokens),
             prompt_tokens=usage.get("prompt_tokens", standard_logging_prompt_tokens),
             completion_tokens=usage.get("completion_tokens", standard_logging_completion_tokens),
-            # Same usage object the daily rollups read, so both totals always agree
+            # Use the same normalized usage source and cache-token extractor as daily rollups.
             cache_read_input_tokens=extract_cache_read_tokens(clean_metadata.get("usage_object")),
             request_tags=request_tags,
             end_user=end_user_id or "",
