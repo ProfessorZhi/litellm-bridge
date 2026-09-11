@@ -2,7 +2,9 @@
 Tests for backend domain models.
 """
 
+import re
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -485,6 +487,12 @@ class TestMCPServerTable:
             LiteLLM_MCPServerTable(server_id="s1")
 
 
+def _read_prisma_model_block(schema_path: Path, model_name: str) -> str:
+    match = re.search(rf"^model {model_name} \{{(.*?)^\}}", schema_path.read_text(), re.MULTILINE | re.DOTALL)
+    assert match is not None, f"model {model_name} not found in {schema_path}"
+    return match.group(1)
+
+
 class TestSpendLogs:
     def test_spend_logs_creation(self):
         log = LiteLLM_SpendLogs(
@@ -518,6 +526,34 @@ class TestSpendLogs:
         )
         assert log.created_at == created_at
         assert log.updated_at == updated_at
+
+    def test_spend_logs_cache_read_input_tokens_defaults_to_zero(self):
+        log = LiteLLM_SpendLogs(
+            request_id="r1",
+            api_key="sk-1",
+            call_type="completion",
+            startTime=None,
+            endTime=None,
+            messages=None,
+            response=None,
+        )
+        assert log.cache_read_input_tokens == 0
+
+    def test_spend_logs_table_declares_cache_read_input_tokens_in_every_schema_copy(self):
+        """prisma generate reads whichever schema copy sits next to the code path in
+        use, and each copy is what the generated client is built from. A column
+        declared in only one of them is absent from the other clients, so the row
+        write fails against those deployments."""
+        schema_root = Path(__file__).resolve().parents[3]
+        for relative_path in (
+            "schema.prisma",
+            "litellm/proxy/schema.prisma",
+            "litellm-proxy-extras/litellm_proxy_extras/schema.prisma",
+        ):
+            model_block = _read_prisma_model_block(schema_root / relative_path, "LiteLLM_SpendLogs")
+            assert re.search(r"^\s*cache_read_input_tokens\s+BigInt\s+@default\(0\)$", model_block, re.MULTILINE), (
+                relative_path
+            )
 
     def test_error_logs_creation(self):
         log = LiteLLM_ErrorLogs(
