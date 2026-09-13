@@ -12831,7 +12831,8 @@ async def _populate_team_access_on_models(
     direct_access_models: Sequence[str] = ()
     if _user_has_admin_view(user_api_key_dict):
         user_teams = "*"
-        direct_access_models = tuple(llm_router.get_model_ids(exclude_team_models=True))  # access to all models    elif user_api_key_dict.user_id is not None:
+        direct_access_models = tuple(llm_router.get_model_ids(exclude_team_models=True))  # access to all models
+    elif user_api_key_dict.user_id is not None:
         user_db_object: Final[SupportsModelDump | None] = await UserRepository(prisma_client).table.find_unique(
             where={"user_id": user_api_key_dict.user_id}
         )
