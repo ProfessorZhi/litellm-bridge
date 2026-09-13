@@ -1988,6 +1988,36 @@ class DBSpendUpdateWriter:
             entity_id_field="tag",
         )
 
+    @staticmethod
+    def _get_daily_spend_date(start_time: datetime | str) -> str:
+        """Return the YYYY-MM-DD bucket key for a spend log in the configured timezone.
+
+        The daily rollup tables (LiteLLM_Daily*Spend) are keyed on ``date``. This used to
+        be the UTC day, which disagreed with the quota/budget windows that reset at the
+        configured timezone's midnight (``litellm_settings.timezone``). Bucketing on the
+        configured timezone keeps the Usage dashboards aligned with when quotas actually
+        reset. With the default timezone ("UTC") this returns exactly the same value as
+        before.
+        """
+        if isinstance(start_time, str):
+            try:
+                dt = datetime.fromisoformat(start_time)
+            except ValueError:
+                # Unparseable timestamp - keep the historical UTC-day behaviour.
+                return start_time.split("T")[0]
+        else:
+            dt = start_time
+        if dt.tzinfo is None:
+            # Spend log timestamps are stored as naive UTC.
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+
+            tz = ZoneInfo(getattr(litellm, "timezone", None) or "UTC")
+        except Exception:
+            tz = timezone.utc
+        return dt.astimezone(tz).date().isoformat()
+
     async def _common_add_spend_log_transaction_to_daily_transaction(
         self,
         payload: dict | SpendLogsPayload,
@@ -2040,11 +2070,8 @@ class DBSpendUpdateWriter:
         verbose_proxy_logger.debug("Logged request status: %s", request_status)
         _metadata: Final[SpendLogsMetadata] = json.loads(payload["metadata"])
         usage_obj: Final = _metadata.get("usage_object", {}) or {}
-        if isinstance(payload["startTime"], datetime):
-            start_time: Final = payload["startTime"].isoformat()
-            date = start_time.split("T")[0]
-        elif isinstance(payload["startTime"], str):
-            date = payload["startTime"].split("T")[0]
+        if isinstance(payload["startTime"], (datetime, str)):
+            date = self._get_daily_spend_date(payload["startTime"])
         else:
             verbose_proxy_logger.debug(
                 "Invalid start time: %s, skipping from daily_user_spend_transactions", payload["startTime"]
