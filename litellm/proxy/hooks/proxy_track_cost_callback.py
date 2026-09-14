@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 import litellm
 from litellm._logging import verbose_proxy_logger
-from litellm.constants import SPEND_LOGS_KEEP_METADATA_KEYS
 from litellm.constants import BACKGROUND_INTERACTION_COST_POLLING_ENABLED
 from litellm.integrations.custom_logger import CustomLogger
 from litellm.litellm_core_utils.core_helpers import (
@@ -156,12 +155,9 @@ class _ProxyDBLogger(CustomLogger):
         if existing_litellm_metadata.get("tags"):
             existing_metadata["tags"] = existing_litellm_metadata.get("tags")
 
-        request_data["litellm_params"]["proxy_server_request"] = {}
-
-        for key in list(existing_metadata.keys()):
-            if key not in SPEND_LOGS_KEEP_METADATA_KEYS:
-                del existing_metadata[key]
-
+        request_data["litellm_params"]["proxy_server_request"] = (
+            request_data.get("proxy_server_request") or existing_litellm_params.get("proxy_server_request") or {}
+        )
         request_data["litellm_params"]["metadata"] = existing_metadata
 
         # Preserve model name and custom_llm_provider
