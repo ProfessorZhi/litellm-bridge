@@ -1536,6 +1536,12 @@ class Logging(LiteLLMLoggingBaseClass):
         service_tier: str | None = None,
         data_residency: str | None = None,
         vertex_location: str | None = None,
+        billing_model: str | None = None,
+        pricing_tier: str | None = None,
+        pricing_source: str | None = None,
+        effective_input_price: float | None = None,
+        effective_cache_read_price: float | None = None,
+        effective_output_price: float | None = None,
     ) -> None:
         """
         Helper method to store cost breakdown in the logging object.
@@ -1555,6 +1561,12 @@ class Logging(LiteLLMLoggingBaseClass):
             service_tier: Tier the costs above were priced on, already resolved
             data_residency: Region uplift the costs above were priced on, already resolved
             vertex_location: Vertex AI location the costs above were priced on, already resolved
+            billing_model: Model whose rate card the costs above were priced on, already resolved
+            pricing_tier: Rate card the costs above were priced on, already resolved
+            pricing_source: Where that rate card came from, already resolved
+            effective_input_price: Per-token rate the non-cached input was priced at, already resolved
+            effective_cache_read_price: Per-token rate the cache-read tokens were priced at, already resolved
+            effective_output_price: Per-token rate the output was priced at, already resolved
         """
 
         self.cost_breakdown = CostBreakdown(
@@ -1565,6 +1577,12 @@ class Logging(LiteLLMLoggingBaseClass):
             service_tier=service_tier,
             data_residency=data_residency,
             vertex_location=vertex_location,
+            billing_model=billing_model,
+            pricing_tier=pricing_tier,
+            pricing_source=pricing_source,
+            effective_input_price=effective_input_price,
+            effective_cache_read_price=effective_cache_read_price,
+            effective_output_price=effective_output_price,
         )
         if cache_read_cost is not None and cache_read_cost > 0:
             self.cost_breakdown["cache_read_cost"] = cache_read_cost
