@@ -77,6 +77,7 @@ BACKEND_PATH_PREFIXES: tuple[str, ...] = (
     # per-resource.
     "/management/v1/",
     # Spend / analytics
+    "/monitor/",  # fork: channel model monitor (upstream-error-only)
     "/spend/",
     "/analytics/",
     "/global/",

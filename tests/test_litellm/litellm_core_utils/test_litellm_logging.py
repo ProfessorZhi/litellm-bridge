@@ -2782,7 +2782,7 @@ def test_get_error_information_budget_exceeded_structured_fields():
     assert result["error_budget_entity_id"] == "repro-user"
     assert result["error_budget_limit"] == 1e-06
     assert result["error_budget_spend"] == 3.4e-05
-    assert result["error_code"] == "429"
+    assert result["error_code"] == "402"  # fork: budget rejections return 402, not 429
     assert result["error_class"] == "BudgetExceededError"
     assert result["error_rate_limit_type"] == "budget"
 
@@ -5876,7 +5876,7 @@ def test_get_error_information_skips_traceback_for_budget_rejection_with_provide
     assert litellm.log_client_error_tracebacks is False
     over_budget = _raise_and_catch(litellm.BudgetExceededError(current_cost=0.01, max_budget=0.0, llm_provider="anthropic"))
     result = StandardLoggingPayloadSetup.get_error_information(over_budget)
-    assert result["error_code"] == "429"
+    assert result["error_code"] == "402"  # fork: budget rejections return 402, not 429
     assert result["llm_provider"] == "anthropic"
     assert result["traceback"] == ""
 

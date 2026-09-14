@@ -1469,7 +1469,7 @@ class TestBudgetExceededErrorSurfacesUnifiedFields:
         # Backward-compat guard: existing callers depend on `status_code=429`
         # and the canonical message format.
         e = litellm.BudgetExceededError(current_cost=0.000109, max_budget=0.0001)
-        assert e.status_code == 429
+        assert e.status_code == 402  # fork: budget rejections return 402, not 429
         assert "Current cost: 0.000109" in e.message
         assert "Max budget: 0.0001" in e.message
 
@@ -1493,7 +1493,7 @@ class TestBudgetExceededErrorSurfacesUnifiedFields:
         info = StandardLoggingPayloadSetup.get_error_information(e)
         assert info["error_rate_limit_category"] == "litellm_rate_limit"
         assert info["error_rate_limit_type"] == "budget"
-        assert info["error_code"] == "429"
+        assert info["error_code"] == "402"  # fork: budget rejections return 402, not 429
         assert info["error_class"] == "BudgetExceededError"
 
     def test_should_propagate_llm_provider_to_standard_logging_payload(self):

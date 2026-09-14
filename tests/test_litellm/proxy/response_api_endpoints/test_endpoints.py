@@ -1656,7 +1656,7 @@ class TestCursorVariantPerModelBudgetEnforcement:
 
         response = _post_cursor_with_real_auth(valid_token, attrs, request_model="claude-opus-5-thinking-high")
 
-        assert response.status_code == 429, response.text
+        assert response.status_code == 402, response.text  # fork: budget rejections return 402, not 429
         error = response.json()["error"]
         assert error["type"] == "budget_exceeded"
         assert "exceeded budget for model=claude-opus-5" in error["message"]
@@ -1667,8 +1667,8 @@ class TestCursorVariantPerModelBudgetEnforcement:
         base_response = _post_cursor_with_real_auth(valid_token, attrs, request_model="claude-opus-5")
         alias_response = _post_cursor_with_real_auth(valid_token, attrs, request_model="claude-opus-5-fast")
 
-        assert base_response.status_code == 429, base_response.text
-        assert alias_response.status_code == 429, alias_response.text
+        assert base_response.status_code == 402, base_response.text  # fork: budget rejections return 402, not 429
+        assert alias_response.status_code == 402, alias_response.text  # fork: budget rejections return 402, not 429
         assert alias_response.json() == base_response.json()
 
 
