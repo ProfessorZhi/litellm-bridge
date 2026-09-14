@@ -11094,27 +11094,20 @@ class TestKeyOwnerPrivilegeEscalation:
         mock_check.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_creator_cannot_reset_own_spend_to_stale_value(self):
-        """Submitting `spend` equal to the stale DB value must still require
-        admin. The DB spend lags the live cross-pod counter, so an
-        "unchanged" spend on the non-admin path would let the creator
-        overwrite the live counter below real usage. Any explicit `spend`
-        is a budget change, regardless of value match."""
+    async def test_creator_may_reset_own_spend_to_stale_value(self):
+        """FORK: the key creator may submit budget fields (incl. `spend`) on
+        their own key without admin. Upstream v1.100 requires admin here; this
+        fork relaxes it and relies on the user-level budget as the backstop."""
         existing = self._make_existing_key(created_by="creator-123")
         existing.spend = 0.0
-        # spend equals the stale DB value (0.0) — the old `!=` gate skipped
-        # the admin check here.
         data = UpdateKeyRequest(key="sk-test", spend=0.0)
         auth = self._make_auth(user_id="creator-123")
 
-        mock_check = AsyncMock(
-            side_effect=HTTPException(status_code=403, detail="Not authorized")
-        )
+        mock_check = AsyncMock()
         with patch(
             "litellm.proxy.management_endpoints.key_management_endpoints._check_key_admin_access",
             mock_check,
         ):
-            with pytest.raises(HTTPException):
                 await _validate_update_key_data(
                     data=data,
                     existing_key_row=existing,
@@ -11124,7 +11117,7 @@ class TestKeyOwnerPrivilegeEscalation:
                     prisma_client=AsyncMock(),
                     user_api_key_cache=MagicMock(),
                 )
-        mock_check.assert_called_once()
+        mock_check.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_assigned_user_blocked_from_model_escalation(self):
@@ -11179,21 +11172,18 @@ class TestKeyOwnerPrivilegeEscalation:
         mock_check.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_creator_cannot_change_own_budget(self):
-        """Budget changes require admin even for the key creator."""
+    async def test_creator_may_change_own_budget(self):
+        """FORK: budget changes on the creator's own key do not require admin."""
         data = UpdateKeyRequest(key="sk-test", max_budget=9999.0)
         existing = self._make_existing_key(created_by="creator-123")
         existing.max_budget = 10.0
         auth = self._make_auth(user_id="creator-123")
 
-        mock_check = AsyncMock(
-            side_effect=HTTPException(status_code=403, detail="Not authorized")
-        )
+        mock_check = AsyncMock()
         with patch(
             "litellm.proxy.management_endpoints.key_management_endpoints._check_key_admin_access",
             mock_check,
         ):
-            with pytest.raises(HTTPException):
                 await _validate_update_key_data(
                     data=data,
                     existing_key_row=existing,
@@ -11203,24 +11193,21 @@ class TestKeyOwnerPrivilegeEscalation:
                     prisma_client=AsyncMock(),
                     user_api_key_cache=MagicMock(),
                 )
-        mock_check.assert_called_once()
+        mock_check.assert_not_called()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("cleared_value", [[], None])
-    async def test_creator_cannot_clear_own_budget_limits(self, cleared_value):
-        """Clearing budget_limits is a budget change and requires admin."""
+    async def test_creator_may_clear_own_budget_limits(self, cleared_value):
+        """FORK: clearing budget_limits on the creator's own key needs no admin."""
         data = UpdateKeyRequest(key="sk-test", budget_limits=cleared_value)
         existing = self._make_existing_key(created_by="creator-123")
         auth = self._make_auth(user_id="creator-123")
 
-        mock_check = AsyncMock(
-            side_effect=HTTPException(status_code=403, detail="Not authorized")
-        )
+        mock_check = AsyncMock()
         with patch(
             "litellm.proxy.management_endpoints.key_management_endpoints._check_key_admin_access",
             mock_check,
         ):
-            with pytest.raises(HTTPException):
                 await _validate_update_key_data(
                     data=data,
                     existing_key_row=existing,
@@ -11230,7 +11217,7 @@ class TestKeyOwnerPrivilegeEscalation:
                     prisma_client=AsyncMock(),
                     user_api_key_cache=MagicMock(),
                 )
-        mock_check.assert_called_once()
+        mock_check.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_admin_can_clear_budget_limits(self):
