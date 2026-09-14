@@ -4804,7 +4804,7 @@ async def feishu_login_callback(request: Request, code: str, state: Optional[str
         "Prisma client is None, connect a database to your proxy"
     )
 
-    verbose_proxy_logger.info(f"[飞书登录] 收到回调, code: {code}, state: {state}")
+    verbose_proxy_logger.info("[飞书登录] 收到回调, code: %s, state: %s", code, state)
 
     try:
         feishu_app_id = os.getenv("FEISHU_APP_ID", os.getenv("GENERIC_CLIENT_ID"))
@@ -4829,10 +4829,10 @@ async def feishu_login_callback(request: Request, code: str, state: Optional[str
             )
             token_data = token_response.json()
 
-            verbose_proxy_logger.info(f"[飞书登录] token响应: {token_data}")
+            verbose_proxy_logger.info("[飞书登录] token响应: %s", token_data)
 
             if "access_token" not in token_data:
-                verbose_proxy_logger.error(f"[飞书登录] 获取access_token失败: {token_data}")
+                verbose_proxy_logger.error("[飞书登录] 获取access_token失败: %s", token_data)
                 raise HTTPException(
                     status_code=400,
                     detail=f"获取飞书access_token失败: {token_data.get('error_description', token_data.get('error', 'Unknown error'))}"
@@ -4847,10 +4847,10 @@ async def feishu_login_callback(request: Request, code: str, state: Optional[str
             )
             user_response_data = user_response.json()
 
-            verbose_proxy_logger.info(f"[飞书登录] 用户信息响应: {user_response_data}")
+            verbose_proxy_logger.info("[飞书登录] 用户信息响应: %s", user_response_data)
 
             if user_response_data.get("code") != 0:
-                verbose_proxy_logger.error(f"[飞书登录] 获取用户信息失败: {user_response_data}")
+                verbose_proxy_logger.error("[飞书登录] 获取用户信息失败: %s", user_response_data)
                 raise HTTPException(
                     status_code=400,
                     detail=f"获取飞书用户信息失败: {user_response_data.get('msg', 'Unknown error')}"
@@ -4864,7 +4864,7 @@ async def feishu_login_callback(request: Request, code: str, state: Optional[str
             mobile = user_data.get("mobile", "")
 
             if not user_id:
-                verbose_proxy_logger.error(f"[飞书登录] 用户信息缺少ID字段: {user_data}")
+                verbose_proxy_logger.error("[飞书登录] 用户信息缺少ID字段: %s", user_data)
                 raise HTTPException(
                     status_code=400,
                     detail="获取飞书用户信息失败，缺少用户ID"
@@ -4874,7 +4874,7 @@ async def feishu_login_callback(request: Request, code: str, state: Optional[str
                 user_email = mobile if mobile else f"{user_id}@feishu.local"
 
             verbose_proxy_logger.info(
-                f"[飞书登录] 用户信息 - user_id: {user_id}, email: {user_email}, name: {user_name}"
+                "[飞书登录] 用户信息 - user_id: %s, email: %s, name: %s", user_id, user_email, user_name
             )
 
             user_id_models: List = []
@@ -4919,9 +4919,9 @@ async def feishu_login_callback(request: Request, code: str, state: Optional[str
                         data=new_user_request,
                         user_api_key_dict=UserAPIKeyAuth(user_role=LitellmUserRoles.PROXY_ADMIN),
                     )
-                    verbose_proxy_logger.info(f"[飞书登录] 成功创建新用户: {user_info.user_id}")
+                    verbose_proxy_logger.info("[飞书登录] 成功创建新用户: %s", user_info.user_id)
                 except Exception as insert_error:
-                    verbose_proxy_logger.exception(f"[飞书登录] 创建用户失败: {insert_error}")
+                    verbose_proxy_logger.exception("[飞书登录] 创建用户失败: %s", insert_error)
                     raise HTTPException(
                         status_code=500,
                         detail=f"创建用户失败: {str(insert_error)}"
@@ -4952,7 +4952,7 @@ async def feishu_login_callback(request: Request, code: str, state: Optional[str
             response_user_id = response["user_id"]
             user_role = user_defined_values.get("user_role") or LitellmUserRoles.INTERNAL_USER_VIEW_ONLY.value
 
-            verbose_proxy_logger.info(f"[飞书登录] 成功生成UI key for user: {response_user_id}")
+            verbose_proxy_logger.info("[飞书登录] 成功生成UI key for user: %s", response_user_id)
 
             disabled_non_admin_personal_key_creation = (
                 get_disabled_non_admin_personal_key_creation()
@@ -4984,7 +4984,7 @@ async def feishu_login_callback(request: Request, code: str, state: Optional[str
             if response_user_id is not None and isinstance(response_user_id, str):
                 litellm_dashboard_ui += "?login=success"
 
-            verbose_proxy_logger.info(f"[飞书登录] 重定向到: {litellm_dashboard_ui}")
+            verbose_proxy_logger.info("[飞书登录] 重定向到: %s", litellm_dashboard_ui)
             redirect_response = RedirectResponse(url=litellm_dashboard_ui, status_code=303)
             redirect_response.set_cookie(key="token", value=jwt_token)
             return redirect_response
@@ -4992,7 +4992,7 @@ async def feishu_login_callback(request: Request, code: str, state: Optional[str
     except HTTPException:
         raise
     except Exception as e:
-        verbose_proxy_logger.exception(f"[飞书登录] 处理失败: {e}")
+        verbose_proxy_logger.exception("[飞书登录] 处理失败: %s", e)
         raise HTTPException(
             status_code=500,
             detail=f"飞书登录处理失败: {str(e)}"
