@@ -1,5 +1,6 @@
 # What is this?
 ## File for 'response_cost' calculation in Logging
+import datetime
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -63,6 +64,13 @@ from litellm.llms.databricks.cost_calculator import (
 )
 from litellm.llms.deepseek.cost_calculator import (
     cost_per_token as deepseek_cost_per_token,
+    deepseek_cost_from_pricing,
+)
+from litellm.llms.deepseek.dynamic_pricing import (
+    DeepSeekPricing,
+    deepseek_pricing_for_request,
+    deepseek_serves_request,
+    request_instant_utc,
 )
 from litellm.llms.fireworks_ai.cost_calculator import (
     cost_per_token as fireworks_ai_cost_per_token,
@@ -384,6 +392,113 @@ def _per_second_pricing_cost(
         response_time_ms,
     )
     return resolved_cost_per_second * seconds, 0.0
+def _resolve_request_pricing_context(
+    litellm_logging_obj: LitellmLoggingObject | None,
+    request_at: datetime.datetime | None,
+    api_base: str | None,
+) -> tuple[datetime.datetime | None, str | None]:
+    """
+    The instant a request was served at and the endpoint it was sent to.
+
+    Every SDK and proxy call populates both on the logging object, so callers that
+    already hold one do not have to thread them through separately.
+    """
+    if litellm_logging_obj is None:
+        return request_at, api_base
+    details: Final = getattr(litellm_logging_obj, "model_call_details", None) or {}
+    litellm_params: Final = getattr(litellm_logging_obj, "litellm_params", None) or {}
+    return (
+        request_at if request_at is not None else details.get("start_time"),
+        api_base or details.get("api_base") or litellm_params.get("api_base"),
+    )
+
+
+def _deepseek_pricing_resolved(
+    model: str,
+    custom_llm_provider: str | None,
+    api_base: str | None,
+    request_at: datetime.datetime | None,
+) -> DeepSeekPricing | None:
+    """
+    The DeepSeek rate card this request is billed against, or None when it cannot
+    be resolved without guessing.
+
+    Never raises, so callers that only report on the pricing (rather than bill with
+    it) cannot turn a computed cost into a failed response. Requests DeepSeek does
+    not serve return before their timestamp is read, because that timestamp is
+    whatever shape the caller happened to pass and reading it is pointless work on
+    every non-DeepSeek request.
+    """
+    if not deepseek_serves_request(model, custom_llm_provider, api_base) or request_at is None:
+        return None
+    instant: Final = request_instant_utc(request_at)
+    if instant is None:
+        return None
+    return deepseek_pricing_for_request(
+        model,
+        instant,
+        custom_llm_provider=custom_llm_provider,
+        api_base=api_base,
+    )
+
+
+def _deepseek_pricing_for_cost(
+    model: str,
+    custom_llm_provider: str | None,
+    api_base: str | None,
+    request_at: datetime.datetime | None,
+) -> DeepSeekPricing | None:
+    """
+    The DeepSeek rate card this request is billed against, or None when DeepSeek
+    does not serve it.
+
+    Raises when DeepSeek does serve the request but the instant it was served at is
+    unknown. Peak and off-peak differ by a factor of two, the model cost map holds
+    no DeepSeek peak/off-peak rates to fall back to, and reporting a rate DeepSeek
+    does not charge is worse than reporting none.
+    """
+    if not deepseek_serves_request(model, custom_llm_provider, api_base):
+        return None
+    pricing: Final = _deepseek_pricing_resolved(model, custom_llm_provider, api_base, request_at)
+    if pricing is None:
+        raise ValueError(
+            f"Cannot price DeepSeek request for model={model}: the request timestamp is required to choose "
+            "between DeepSeek's peak and off-peak rates. Pass request_at, or a litellm_logging_obj whose "
+            "model_call_details carry start_time."
+        )
+    return pricing
+
+
+def _deepseek_pricing_basis_columns(
+    pricing: DeepSeekPricing | None,
+) -> tuple[str | None, str | None, str | None, float | None, float | None, float | None]:
+    """The cost-breakdown columns describing the rate card a request was priced on."""
+    if pricing is None:
+        return None, None, None, None, None, None
+    return (
+        pricing.billing_model,
+        pricing.tier,
+        pricing.source,
+        pricing.input_price,
+        pricing.cache_read_price,
+        pricing.output_price,
+    )
+
+
+def _prompt_tokens_include_cache_tokens(usage_object: Usage | None, cache_tokens: float) -> bool:
+    """
+    Whether a usage object's ``prompt_tokens`` already counts its cached tokens.
+
+    OpenAI-format usage reports a cache hit as one of the prompt's details and counts
+    it in the prompt; Anthropic-format usage reports it in a field of its own and
+    leaves it out. One usage object can carry both shapes' fields at once, so which
+    fields are set does not separate them. The prompt's own size does: a prompt cannot
+    count tokens it is smaller than. A caller that passes no usage object passes counts
+    in the inclusive convention, which is how ``generic_cost_per_token`` reads them.
+    """
+    if usage_object is None:
+        return True
+    return float(usage_object.prompt_tokens or 0) >= cache_tokens
 
 
 def cost_per_token(
@@ -422,6 +537,10 @@ def cost_per_token(
     request_model: str | None = None,  # original request model for router detection
     custom_model_info: OCRPricing | None = None,
     bedrock_model_info: ModelInfo | None = None,
+    ### REQUEST TIMESTAMP ### - for providers whose price depends on when the request was served
+    request_at: datetime.datetime | None = None,
+    ### API BASE ### - distinguishes endpoints that share a provider label
+    api_base: str | None = None,
 ) -> tuple[float, float]:
     """
     Calculates the cost per token for a given model, prompt tokens, and completion tokens.
@@ -512,6 +631,27 @@ def cost_per_token(
 
     if response_cost is not None:
         return response_cost[0], response_cost[1]
+
+    ## DEEPSEEK PEAK / OFF-PEAK PRICING ##
+    deepseek_pricing: Final = _deepseek_pricing_for_cost(
+        model=model,
+        custom_llm_provider=custom_llm_provider,
+        api_base=api_base,
+        request_at=request_at,
+    )
+    if deepseek_pricing is not None:
+        deepseek_prompt_tokens: Final = float(usage_block.prompt_tokens or 0)
+        deepseek_cache_tokens: Final = _cache_read_tokens + _cache_creation_tokens
+        return deepseek_cost_from_pricing(
+            pricing=deepseek_pricing,
+            prompt_tokens=(
+                deepseek_prompt_tokens
+                if _prompt_tokens_include_cache_tokens(usage_object, deepseek_cache_tokens)
+                else deepseek_prompt_tokens + deepseek_cache_tokens
+            ),
+            cached_tokens=_cache_read_tokens,
+            completion_tokens=float(usage_block.completion_tokens or 0),
+        )
 
     model_cost_ref: Final = litellm.model_cost
     # Only callers that explicitly pass `custom_llm_provider` get the
@@ -1328,6 +1468,12 @@ def _store_cost_breakdown_in_logging_obj(
     data_residency: str | None = None,
     vertex_location: str | None = None,
     billed_token_rates: BilledTokenRates | None = None,
+    billing_model: str | None = None,
+    pricing_tier: str | None = None,
+    pricing_source: str | None = None,
+    effective_input_price: float | None = None,
+    effective_cache_read_price: float | None = None,
+    effective_output_price: float | None = None,
 ) -> None:
     """
     Helper function to store cost breakdown in the logging object.
@@ -1348,6 +1494,12 @@ def _store_cost_breakdown_in_logging_obj(
         service_tier: Tier the costs above were priced on, already resolved
         data_residency: Region uplift the costs above were priced on, already resolved
         vertex_location: Vertex AI location the costs above were priced on, already resolved
+        billing_model: Model whose rate card the costs above were priced on, already resolved
+        pricing_tier: Rate card the costs above were priced on, already resolved
+        pricing_source: Where that rate card came from, already resolved
+        effective_input_price: Per-token rate the non-cached input was priced at, already resolved
+        effective_cache_read_price: Per-token rate the cache-read tokens were priced at, already resolved
+        effective_output_price: Per-token rate the output was priced at, already resolved
     """
     if litellm_logging_obj is None:
         return
@@ -1373,6 +1525,12 @@ def _store_cost_breakdown_in_logging_obj(
             data_residency=data_residency,
             vertex_location=vertex_location,
             billed_token_rates=billed_token_rates,
+            billing_model=billing_model,
+            pricing_tier=pricing_tier,
+            pricing_source=pricing_source,
+            effective_input_price=effective_input_price,
+            effective_cache_read_price=effective_cache_read_price,
+            effective_output_price=effective_output_price,
         )
 
     except Exception as breakdown_error:
@@ -1450,6 +1608,10 @@ def completion_cost(
     data_residency: str | None = None,  # for OpenAI regional-processing uplift (e.g. "eu", "us")
     ### VERTEX LOCATION ###
     vertex_location: str | None = None,  # for Vertex AI regional-endpoint uplift (e.g. "us-east5", "global")
+    ### REQUEST TIMESTAMP ### - for providers whose price depends on when the request was served
+    request_at: datetime.datetime | None = None,
+    ### API BASE ### - distinguishes endpoints that share a provider label
+    api_base: str | None = None,
 ) -> float:
     """
     Calculate the cost of a given completion call fot GPT-3.5-turbo, llama2, any litellm supported llm.
@@ -1908,6 +2070,15 @@ def completion_cost(
                     request_model_for_cost = litellm_logging_obj.model
 
                 (
+                    request_at_for_cost,
+                    api_base_for_cost,
+                ) = _resolve_request_pricing_context(
+                    litellm_logging_obj=litellm_logging_obj,
+                    request_at=request_at,
+                    api_base=api_base,
+                )
+
+                (
                     prompt_tokens_cost_usd_dollar,
                     completion_tokens_cost_usd_dollar,
                 ) = cost_per_token(
@@ -1933,6 +2104,9 @@ def completion_cost(
                     response=completion_response,
                     custom_model_info=_ocr_model_info(litellm_logging_obj, custom_pricing, router_model_id),
                     bedrock_model_info=bedrock_model_info,
+                    request_model=request_model_for_cost,
+                    request_at=request_at_for_cost,
+                    api_base=api_base_for_cost,
                 )
 
                 # Get additional costs from provider (e.g., routing fees, infrastructure costs)
@@ -2009,6 +2183,21 @@ def completion_cost(
                     _cache_read_cost: float | None = None
                     _cache_creation_cost: float | None = None
                     _billed_token_rates: BilledTokenRates | None = None
+                    (
+                        _billing_model,
+                        _pricing_tier,
+                        _pricing_source,
+                        _effective_input_price,
+                        _effective_cache_read_price,
+                        _effective_output_price,
+                    ) = _deepseek_pricing_basis_columns(
+                        _deepseek_pricing_resolved(
+                            model=model,
+                            custom_llm_provider=custom_llm_provider,
+                            api_base=api_base_for_cost,
+                            request_at=request_at_for_cost,
+                        )
+                    )
                     if cost_per_token_usage_object is not None and model:
                         _breakdown_provider: str | None = (
                             custom_llm_provider if isinstance(custom_llm_provider, str) else None
@@ -2022,6 +2211,8 @@ def completion_cost(
                             vertex_location=vertex_location,
                             custom_cost_per_token=custom_cost_per_token,
                             model_info=bedrock_model_info,
+                            request_at=request_at_for_cost,
+                            api_base=api_base_for_cost,
                         )
                         _reasoning_cost = _token_type_breakdown.reasoning_cost
                         _cache_read_cost = _token_type_breakdown.cache_read_cost
@@ -2047,6 +2238,12 @@ def completion_cost(
                         data_residency=data_residency,
                         vertex_location=vertex_location,
                         billed_token_rates=_billed_token_rates,
+                        billing_model=_billing_model,
+                        pricing_tier=_pricing_tier,
+                        pricing_source=_pricing_source,
+                        effective_input_price=_effective_input_price,
+                        effective_cache_read_price=_effective_cache_read_price,
+                        effective_output_price=_effective_output_price,
                     )
 
                 return _final_cost

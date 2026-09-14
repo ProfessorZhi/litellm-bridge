@@ -1,6 +1,7 @@
 # What is this?
 ## Helper utilities for cost_per_token()
 
+import datetime
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -19,6 +20,12 @@ from litellm.litellm_core_utils.llm_cost_calc.tiered_pricing import (
     tier_rate,
 )
 from litellm.llms.fireworks_ai.cache_pricing import with_default_cache_read_rate
+from litellm.llms.deepseek.dynamic_pricing import (
+    DeepSeekPricing,
+    deepseek_pricing_for_request,
+    deepseek_serves_request,
+    request_instant_utc,
+)
 from litellm.types.utils import (
     CacheCreationTokenDetails,
     CallTypes,
@@ -1714,6 +1721,56 @@ def get_billed_token_rates(
     )
 
 
+def _deepseek_pricing_for_breakdown(
+    model: str,
+    custom_llm_provider: str | None,
+    api_base: str | None,
+    request_at: datetime.datetime | float | int | None,
+) -> DeepSeekPricing | None:
+    """
+    The DeepSeek rate card to break this request's cost down against, or None when
+    there is none to break it down against.
+
+    Requests DeepSeek does not serve return before their timestamp is read, because
+    that timestamp is whatever shape the caller happened to pass and reading it is
+    pointless work on every non-DeepSeek request. A timestamp that carries no
+    instant leaves the breakdown on the model cost map rather than failing a
+    response whose total cost was already computed.
+    """
+    if not deepseek_serves_request(model, custom_llm_provider, api_base) or request_at is None:
+        return None
+    instant: Final = request_instant_utc(request_at)
+    if instant is None:
+        return None
+    return deepseek_pricing_for_request(
+        model,
+        instant,
+        custom_llm_provider=custom_llm_provider,
+        api_base=api_base,
+    )
+
+
+def _deepseek_token_type_cost_breakdown(pricing: DeepSeekPricing, usage: Usage) -> TokenTypeCostBreakdown:
+    """
+    DeepSeek bills reasoning at the output rate and does not charge for cache
+    writes, so the cache-read share of the prompt is the only input line item of
+    its own.
+    """
+    cached_tokens: Final = (
+        parse_prompt_tokens_details(usage)["cache_hit_tokens"] if usage.prompt_tokens_details is not None else 0
+    )
+    reasoning_tokens: Final = (
+        parse_completion_tokens_details(usage)["reasoning_tokens"]
+        if usage.completion_tokens_details is not None
+        else 0
+    )
+    return TokenTypeCostBreakdown(
+        reasoning_cost=float(reasoning_tokens) * pricing.output_price,
+        cache_read_cost=float(cached_tokens) * pricing.cache_read_price,
+        cache_creation_cost=0.0,
+    )
+
+
 def get_token_type_cost_breakdown(
     model: str,
     custom_llm_provider: str | None,
@@ -1724,6 +1781,8 @@ def get_token_type_cost_breakdown(
     current_time: datetime | None = None,
     custom_cost_per_token: CostPerToken | None = None,
     model_info: ModelInfo | None = None,
+    request_at: datetime.datetime | None = None,
+    api_base: str | None = None,
 ) -> TokenTypeCostBreakdown:
     """
     Provider-agnostic cost of reasoning and cache tokens, derived from the usage
@@ -1739,6 +1798,15 @@ def get_token_type_cost_breakdown(
     like its totals, bills cache writes flat rather than by their 5m/1h split.
     Returns zeros (never raises) when the model or its pricing cannot be resolved.
     """
+    deepseek_pricing: Final = _deepseek_pricing_for_breakdown(
+        model=model,
+        custom_llm_provider=custom_llm_provider,
+        api_base=api_base,
+        request_at=request_at,
+    )
+    if deepseek_pricing is not None:
+        return _deepseek_token_type_cost_breakdown(deepseek_pricing, usage)
+
     rates: Final = get_billed_token_rates(
         model=model,
         custom_llm_provider=custom_llm_provider,

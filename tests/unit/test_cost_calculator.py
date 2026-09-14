@@ -8683,3 +8683,45 @@ def test_bedrock_registered_cache_prices_preserve_dynamic_threshold_rates(
     assert entry is not None
     assert entry[1]["input_cost_per_token_above_300k_tokens"] == 0.03
     assert entry[1][tier_field] == (tier_override if tier_override is not None else 0.007)
+
+def test_completion_cost_does_not_bill_a_deepseek_cache_hit_twice(_local_model_cost_map):
+    """Regression: one usage object can carry the cache hit both as the prompt detail it
+    is and as the top-level cache_read_input_tokens field, and the DeepSeek rate-card path
+    took that field as proof the prompt excluded it, so pricing the same counts twice
+    produced two costs and the recorded breakdown overstated the spend."""
+
+    prompt_tokens, cached_tokens, completion_tokens = 2096, 1920, 16
+    counts = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+    as_a_prompt_detail = Usage(
+        **counts,
+        prompt_tokens_details=PromptTokensDetailsWrapper(cached_tokens=cached_tokens),
+    )
+    also_as_its_own_field = Usage(
+        **counts,
+        prompt_tokens_details=PromptTokensDetailsWrapper(cached_tokens=cached_tokens),
+        cache_read_input_tokens=cached_tokens,
+    )
+
+    # A Saturday, so the request is off peak whatever the weekday windows are.
+    off_peak = datetime.datetime(2026, 9, 19, 2, tzinfo=datetime.timezone.utc)
+    priced_as_a_prompt_detail = cost_per_token(
+        model="deepseek-v4-flash",
+        custom_llm_provider="deepseek",
+        request_at=off_peak,
+        usage_object=as_a_prompt_detail,
+    )
+    priced_with_the_field = cost_per_token(
+        model="deepseek-v4-flash",
+        custom_llm_provider="deepseek",
+        request_at=off_peak,
+        usage_object=also_as_its_own_field,
+    )
+
+    assert priced_with_the_field == priced_as_a_prompt_detail
+    assert priced_as_a_prompt_detail[0] == pytest.approx(
+        (prompt_tokens - cached_tokens) * 0.15e-6 + cached_tokens * 0.003e-6, abs=1e-15
+    )

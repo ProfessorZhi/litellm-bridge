@@ -3608,11 +3608,23 @@ class CostBreakdown(TypedDict, total=False):
     charged for it) needs the same basis to compare like with like, and re-deriving it
     from the request is not possible after the fact: the tier the biller used comes
     from ``optional_params``, which no log record carries.
+
+    ``billing_model``, ``pricing_tier``, and the ``effective_*_price`` rates are the
+    same idea for providers that publish more than one rate card for a model and pick
+    between them per request. They record the card that was applied and the per-token
+    rates that came out of it, so a reported cost can be checked against the
+    provider's published numbers without re-running the request.
     """
 
     service_tier: str | None
     data_residency: str | None
     vertex_location: ReadOnly[str | None]
+    billing_model: ReadOnly[str | None]
+    pricing_tier: ReadOnly[str | None]
+    pricing_source: ReadOnly[str | None]
+    effective_input_price: ReadOnly[float | None]
+    effective_cache_read_price: ReadOnly[float | None]
+    effective_output_price: ReadOnly[float | None]
     input_cost: float  # Cost of raw (non-cached) input tokens only
     cache_read_cost: float  # Cost of cache-read tokens (discounted rate)
     cache_creation_cost: float  # Cost of cache-write tokens (premium rate)
