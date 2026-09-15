@@ -121,7 +121,7 @@ const ALL_CLOSED_PAYLOAD = {
   team_id: null,
   key_alias: "contract-key",
   models: [],
-  key_type: "llm_api",
+  key_type: "default",  // fork: default key type is Full Access, not AI APIs
   user_id: "test-user-id",
   duration: null,
   metadata: "{}",

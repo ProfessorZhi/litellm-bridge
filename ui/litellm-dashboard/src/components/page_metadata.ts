@@ -6,6 +6,7 @@
 // Page descriptions for UI Settings configuration
 export const pageDescriptions: Record<string, string> = {
   "api-keys": "Manage virtual keys for API access and authentication",
+  "channel-monitor": "Monitor upstream channel health: success rate, latency and failures by model",
   "llm-playground": "Interactive playground for testing LLM requests",
   models: "Configure and manage LLM models and endpoints",
   agents: "Create and manage AI agents",
