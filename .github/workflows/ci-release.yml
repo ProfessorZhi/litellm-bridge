@@ -105,6 +105,9 @@ jobs:
         run: npm ci
       - name: Build
         run: npm run build
+      - name: 校验签入的 UI 产物 (无冲突标记 + chunk 自洽)
+        working-directory: ${{ github.workspace }}
+        run: bash .github/scripts/assert_ui_bundle.sh
 
   # ============ 4. 前端 lint (全量 prettier + eslint) ============
   ui-lint:
