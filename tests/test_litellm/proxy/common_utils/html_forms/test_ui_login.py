@@ -2,7 +2,9 @@
 
 from litellm.proxy.common_utils.html_forms.ui_login import build_ui_login_form
 
-DISCLOSURE_MARKERS = ("Default Credentials", "MASTER_KEY")
+# fork (LITELLM-UI-001): the info box carries the feishu guide links instead
+# of upstream's default-credentials hint.
+DISCLOSURE_MARKERS = ("使用指南", "guide-box")
 FORM_MARKERS = ('name="username"', 'name="password"')
 
 

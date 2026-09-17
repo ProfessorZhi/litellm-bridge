@@ -100,8 +100,9 @@ def test_fallback_login_shows_credentials_hint_by_default(client, monkeypatch):
     monkeypatch.delenv("LITELLM_HIDE_DEFAULT_CREDENTIALS_HINT", raising=False)
     response = client.get("/fallback/login")
     assert response.status_code == 200
-    assert "Default Credentials" in response.text
-    assert "MASTER_KEY" in response.text
+    # fork (LITELLM-UI-001): the page shows the feishu guide box instead of
+    # the default-credentials hint.
+    assert "使用指南" in response.text
 
 
 def test_fallback_login_hides_credentials_hint_via_env_flag(client, monkeypatch):

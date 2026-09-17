@@ -40,26 +40,6 @@ def build_ui_login_form(
         ""
         if hide_default_credentials_hint
         else """
-        <div class="info-box">
-            <div class="info-header">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <line x1="12" y1="16" x2="12" y2="12"></line>
-                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
-                </svg>
-                Default Credentials
-            </div>
-            <p>By default, Username is <code>admin</code> and Password is your set LiteLLM Proxy <code>MASTER_KEY</code>.</p>
-            <p>Need to set UI credentials or SSO? <a href="https://docs.litellm.ai/docs/proxy/ui" target="_blank">Check the documentation</a>.</p>
-        </div>
-        """
-    )
-
-    # LITELLM-UI-001: 额外的飞书配置教程链接（与登录后首页顶部 GuideButtons 一致）
-    guide_box_html: Final = (
-        ""
-        if hide_default_credentials_hint
-        else """
         <div class="info-box guide-box">
             <div class="info-header">
                 使用指南 & 配置教程
@@ -357,7 +337,6 @@ def build_ui_login_form(
         </div>
         <h2>Login</h2>
         {info_box_html}
-        {guide_box_html}
         <label for="username">Username<span class="required">*</span></label>
         <input type="text" id="username" name="username" required placeholder="Enter your username" autocomplete="username">
         

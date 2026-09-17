@@ -7976,8 +7976,9 @@ async def test_legacy_login_page_shows_credentials_hint_by_default():
 
     body = response.body.decode()
     assert response.status_code == 200
-    assert "Default Credentials" in body
-    assert "MASTER_KEY" in body
+    # fork (LITELLM-UI-001): the page shows the feishu guide box instead of
+    # the default-credentials hint.
+    assert "使用指南" in body
 
 
 @pytest.mark.asyncio
