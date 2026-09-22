@@ -1,3 +1,14 @@
+<!-- bridge-only notice, not part of upstream litellm -->
+
+> **本仓是团队仓 `79JaX/litellm-fjd` 的镜像 / 发布仓，不是开发主线。**
+> `main` 与 `dev` 是 2026-09-04 冻结的独立历史镜像锚点（与团队历史无共同祖先），
+> 不跟随团队修复：从 `main` 部署会拿到修复前的代码。
+> 不要在此开发。详见 [BRIDGE-BASELINE.md](./BRIDGE-BASELINE.md)。
+>
+> **This repository mirrors the team repo `79JaX/litellm-fjd`; it is not the line of
+> development.** `main` and `dev` are frozen 2026-09-04 snapshots on an independent
+> history. See [BRIDGE-BASELINE.md](./BRIDGE-BASELINE.md).
+
 <h1 align="center">
         🚅 LiteLLM
     </h1>
