@@ -138,6 +138,13 @@ RUN find /app/.venv -type f -path "*/tornado/test/*" -delete && \
     test -f /opt/prisma/binaries/node_modules/prisma/build/index.js && \
     python -c "from prisma.client import BINARY_PATHS; paths = list(BINARY_PATHS.query_engine.values()); assert paths and all(p.startswith('/opt/prisma/') for p in paths), paths"
 
+# The internal gateway (sub2) is served over a self-signed LAN CA that the
+# public trust store does not carry. Append it to the store wolfi already
+# ships; copy it into place first so the append and the cleanup are one layer.
+COPY ca.crt /tmp/fjd-sub2api-ca.crt
+RUN cat /tmp/fjd-sub2api-ca.crt >> /etc/ssl/certs/ca-certificates.crt \
+ && rm -f /tmp/fjd-sub2api-ca.crt
+
 EXPOSE 4000/tcp
 
 ENTRYPOINT ["docker/prod_entrypoint.sh"]
