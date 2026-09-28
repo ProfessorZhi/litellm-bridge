@@ -39,6 +39,7 @@ class _Spend:
     llm_provider: Optional[str] = None
     error_code: Optional[str] = None
     traceback: Optional[str] = None
+    user_api_key: Optional[str] = None
     duration_ms: int = 1000
     total_tokens: int = 0
     prompt_tokens: int = 0
@@ -58,6 +59,9 @@ SCENARIO: Final = (
         error_class="HTTPException",
         traceback="httpx.HTTPStatusError: 401 Unauthorized for https://upstream.invalid/v1/messages",
     ),
+    # The only row carrying a real vendor, so it is the only one the provider
+    # rule can claim. Without it that branch of the classifier has no signal.
+    _Spend("up-2", "failure", error_code="500", llm_provider="anthropic"),
     _Spend("unk-1", "failure", error_class="SomethingUnmapped", llm_provider="litellm_proxy"),
     _Spend("oth-1", None),
 )
@@ -65,6 +69,24 @@ SCENARIO: Final = (
 # Scenario ids are unique per run, not per row shape, so the fan-out row needs
 # its own name: reusing SCENARIO[0] would insert one id under two model groups.
 FANOUT_SPEND: Final = _Spend("fanout-1", "success")
+
+# The proxy rejects this before any upstream is contacted, so llm_provider is
+# never populated and the failure says nothing about the channel. Each rule gets
+# its own model group so that removing one rule fails only that rule's test.
+PARAM_OK: Final = _Spend("param-ok", "success")
+PARAM_SPEND: Final = _Spend(
+    "param-1", "failure", error_class="ProxyMissingRequiredParamError", llm_provider=""
+)
+
+# These two differ in exactly one field, user_api_key. That absence is the only
+# signal distinguishing a request that carried no credential from an
+# authenticated one, so the pair pins the discriminator instead of the whole
+# Exception class.
+AUTH_OK: Final = _Spend("auth-ok", "success")
+AUTH_NO_KEY: Final = _Spend("auth-nokey", "failure", error_class="Exception")
+AUTH_WITH_KEY: Final = _Spend(
+    "auth-keyed", "failure", error_class="Exception", user_api_key="hashed-key-material"
+)
 
 
 @dataclass(frozen=True)
@@ -74,6 +96,8 @@ class Monitor:
     fanout_model: str
     classify_model: str
     idle_model: str
+    param_model: str
+    auth_model: str
 
     async def summary(self, client: Any, model: str) -> List[Dict[str, Any]]:
         resp = await client.get(
@@ -124,7 +148,16 @@ async def _insert_spend(prisma: Any, model_group: str, spend: _Spend, run_tag: s
         )
         if value is not None
     }
-    metadata = {"error_information": error_information} if error_information else {}
+    # user_api_key sits at the top level of metadata, not inside error_information.
+    # It is absent, never blank, when the request carried no credential at all.
+    metadata: Dict[str, Any] = dict(
+        item
+        for item in (
+            ("error_information", error_information or None),
+            ("user_api_key", spend.user_api_key),
+        )
+        if item[1] is not None
+    )
     await prisma.db.execute_raw(
         """
         INSERT INTO "LiteLLM_SpendLogs"
@@ -155,6 +188,8 @@ async def monitor(prisma, proxy_client, world) -> AsyncIterator[Monitor]:
         fanout_model=f"scratch-mon-fanout-{tag}",
         classify_model=f"scratch-mon-classify-{tag}",
         idle_model=f"scratch-mon-idle-{tag}",
+        param_model=f"scratch-mon-param-{tag}",
+        auth_model=f"scratch-mon-auth-{tag}",
     )
     try:
         # Two deployments of one model name is the fan-out condition. One
@@ -167,11 +202,25 @@ async def monitor(prisma, proxy_client, world) -> AsyncIterator[Monitor]:
         for spend in SCENARIO:
             await _insert_spend(prisma, scenario.classify_model, spend, tag)
 
+        await _insert_deployment(prisma, scenario.param_model)
+        for spend in (PARAM_OK, PARAM_SPEND):
+            await _insert_spend(prisma, scenario.param_model, spend, tag)
+
+        await _insert_deployment(prisma, scenario.auth_model)
+        for spend in (AUTH_OK, AUTH_NO_KEY, AUTH_WITH_KEY):
+            await _insert_spend(prisma, scenario.auth_model, spend, tag)
+
         # Configured but silent: must still be listed, with a null bucket.
         await _insert_deployment(prisma, scenario.idle_model)
         yield scenario
     finally:
-        for model in (scenario.fanout_model, scenario.classify_model, scenario.idle_model):
+        for model in (
+            scenario.fanout_model,
+            scenario.classify_model,
+            scenario.idle_model,
+            scenario.param_model,
+            scenario.auth_model,
+        ):
             await prisma.db.execute_raw(
                 'DELETE FROM "LiteLLM_SpendLogs" WHERE model_group = $1', model
             )
@@ -215,7 +264,7 @@ async def test_platform_side_failure_is_client_caused_and_still_counted(
     """
     bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
     assert bucket["client_failures"] == 1
-    assert bucket["failed_requests"] == 4
+    assert bucket["failed_requests"] == 5
 
 
 async def test_upstream_passthrough_401_is_not_caller_caused(
@@ -224,18 +273,33 @@ async def test_upstream_passthrough_401_is_not_caller_caused(
     """A 401 the upstream returned is channel side, even with no provider field.
 
     The pass-through handler records the upstream httpx error in the traceback,
-    which is what separates it from a 401 the proxy itself issued.
+    which is what keeps it out of the caller-caused branch. Drop that clause and
+    this row joins the proxy-issued 401, taking client_failures from 1 to 2.
     """
     bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
-    assert bucket["upstream_failures"] == 1
     assert bucket["client_failures"] == 1
+    assert bucket["channel_failures"] == 4
+
+
+async def test_upstream_error_with_vendor_attribution_is_counted_upstream(
+    monitor: Monitor, proxy_client
+):
+    """A failure the vendor is named for is an upstream failure, not a caller one."""
+    bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
+    assert bucket["upstream_failures"] == 1
+    assert bucket["transport_failures"] == 1
 
 
 async def test_unprovable_failure_defaults_to_channel(monitor: Monitor, proxy_client):
-    """Anything that cannot be shown to be the caller's fault counts against the channel."""
+    """Anything that cannot be shown to be the caller's fault counts against the channel.
+
+    Two rows land here: the pass-through 401 and an exception class nothing
+    names. Neither disappears from the total, which is what the pre-fix join
+    predicate did to exempt rows.
+    """
     bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
-    assert bucket["unclassified_failures"] == 1
-    assert bucket["channel_failures"] == 3
+    assert bucket["unclassified_failures"] == 2
+    assert bucket["channel_failures"] == 4
     assert bucket["client_failures"] + bucket["channel_failures"] == bucket["failed_requests"]
 
 
@@ -260,7 +324,7 @@ async def test_counts_partition_every_row(monitor: Monitor, proxy_client):
 async def test_health_excludes_caller_caused_failures(monitor: Monitor, proxy_client):
     """Availability is success over success plus channel failures, not over total."""
     bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
-    assert bucket["health"] == pytest.approx(2 / 5, abs=1e-4)
+    assert bucket["health"] == pytest.approx(2 / 6, abs=1e-4)
 
 
 async def test_configured_model_without_traffic_is_listed_with_null_bucket(
@@ -272,3 +336,30 @@ async def test_configured_model_without_traffic_is_listed_with_null_bucket(
     assert rows[0]["model_group"] == monitor.idle_model
     assert rows[0]["bucket"] is None
     assert rows[0]["total_requests"] == 0
+
+
+async def test_missing_required_param_is_caller_caused(monitor: Monitor, proxy_client):
+    """A rejected required param never reaches an upstream, so the channel is untouched.
+
+    The row carries no llm_provider and no 401/402/403 code, so before it was
+    named it fell through to unclassified, which counts as a channel failure and
+    dragged down the availability of every model that saw one.
+    """
+    bucket = await monitor.only_bucket(proxy_client, monitor.param_model)
+    assert bucket["client_failures"] == 1
+    assert bucket["channel_failures"] == 0
+    assert bucket["health"] == pytest.approx(1.0, abs=1e-4)
+
+
+async def test_request_with_no_credential_is_caller_caused(monitor: Monitor, proxy_client):
+    """A request that carried no credential is the caller's fault, and only that proves it.
+
+    Both failure rows have the same shape apart from user_api_key, so the
+    authenticated one stays channel side. An exception nothing can attribute is
+    still the channel's until something shows otherwise.
+    """
+    bucket = await monitor.only_bucket(proxy_client, monitor.auth_model)
+    assert bucket["client_failures"] == 1
+    assert bucket["unclassified_failures"] == 1
+    assert bucket["channel_failures"] == 1
+    assert bucket["health"] == pytest.approx(1 / 2, abs=1e-4)

@@ -153,8 +153,15 @@ async def channel_summary(
                     WHEN s.status IS DISTINCT FROM 'failure' THEN NULL
                     WHEN COALESCE(s.metadata->'error_information'->>'error_class', '') IN (
                         'BudgetExceededError', 'ContextWindowExceededError', 'KeyModelAccessDenied',
-                        'KeyNotFoundError', 'ProxyModelNotFoundError'
+                        'KeyNotFoundError', 'ProxyMissingRequiredParamError', 'ProxyModelNotFoundError'
                     ) THEN 'client'
+                    -- 未带鉴权头的请求: 认证层在记账前抛裸 Exception, 无 error_code、无 provider 归因,
+                    -- 顶层 user_api_key 也不会写。四者同时为空才判调用方, 否则真实的渠道异常会被洗成 client。
+                    WHEN COALESCE(s.metadata->'error_information'->>'error_class', '') = 'Exception'
+                     AND s.metadata->>'user_api_key' IS NULL
+                     AND COALESCE(s.metadata->'error_information'->>'error_code', '') = ''
+                     AND COALESCE(s.metadata->'error_information'->>'llm_provider', '') IN ('', 'litellm_proxy', 'litellm')
+                        THEN 'client'
                     -- 出站传输失败(如 httpx.ReadError 在上游流读取时抛出)属渠道侧。
                     WHEN COALESCE(s.metadata->'error_information'->>'error_class', '') IN (
                         'APIConnectionError', 'ConnectError', 'ConnectTimeout', 'LocalProtocolError',
