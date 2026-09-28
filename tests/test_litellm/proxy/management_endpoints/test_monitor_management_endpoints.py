@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from litellm.proxy.management_endpoints.monitor_management_endpoints import (
     ChannelBucket,
+    _RawBucket,
     _bucket_from_row,
     _parse_dt,
 )
@@ -43,11 +44,21 @@ def _row(**overrides) -> dict:
     return row
 
 
+def _bucket(row: dict) -> ChannelBucket:
+    """One raw SQL row, mapped the way the endpoint maps it.
+
+    The endpoint validates each row into _RawBucket before mapping it, so a test
+    that handed the mapping a bare dict would be exercising a call the endpoint
+    never makes.
+    """
+    return _bucket_from_row(_RawBucket.model_validate(row))
+
+
 class TestHealthDenominator:
     """Channel availability = success / (success + channel_failures). Not success / total."""
 
     def test_denominator_is_success_plus_channel_failures_not_total(self):
-        bucket = _bucket_from_row(
+        bucket = _bucket(
             _row(
                 total_requests=1000,
                 success_requests=900,
@@ -61,17 +72,19 @@ class TestHealthDenominator:
         assert bucket.health != pytest.approx(900 / 1000, abs=1e-4)
 
     def test_caller_caused_failures_leave_channel_fully_available(self):
-        bucket = _bucket_from_row(
-            _row(total_requests=100, success_requests=90, failed_requests=10, client_failures=10)
-        )
+        bucket = _bucket(_row(total_requests=100, success_requests=90, failed_requests=10, client_failures=10))
         assert bucket.health == 1.0
 
     def test_unclassified_failures_count_against_availability(self):
-        bucket = _bucket_from_row(
+        # 20 requests that were neither delivered nor failed, so the healthy
+        # count and the total are different numbers and the assertion can tell
+        # which of the two the denominator is.
+        bucket = _bucket(
             _row(
-                total_requests=100,
+                total_requests=120,
                 success_requests=95,
                 failed_requests=5,
+                other_requests=20,
                 channel_failures=5,
                 unclassified_failures=5,
             )
@@ -79,7 +92,7 @@ class TestHealthDenominator:
         assert bucket.health == pytest.approx(0.95)
 
     def test_no_traffic_scores_zero_rather_than_erroring(self):
-        bucket = _bucket_from_row(_row())
+        bucket = _bucket(_row())
         assert bucket.health == 0.0
 
 
@@ -87,7 +100,7 @@ class TestRowMapping:
     """The four request counts and the failure breakdown pass through unchanged."""
 
     def test_failure_breakdown_is_read_not_derived(self):
-        bucket = _bucket_from_row(
+        bucket = _bucket(
             _row(
                 total_requests=162,
                 success_requests=0,
@@ -103,21 +116,17 @@ class TestRowMapping:
         assert bucket.channel_failures != bucket.failed_requests - bucket.client_failures
 
     def test_other_requests_are_carried_through(self):
-        bucket = _bucket_from_row(
-            _row(total_requests=100, success_requests=90, failed_requests=8, other_requests=2)
-        )
+        bucket = _bucket(_row(total_requests=100, success_requests=90, failed_requests=8, other_requests=2))
         assert bucket.total_requests == 100
         assert bucket.success_requests + bucket.failed_requests + bucket.other_requests == 100
 
     def test_upstream_and_transport_are_kept_apart(self):
-        bucket = _bucket_from_row(
-            _row(failed_requests=84, channel_failures=84, upstream_failures=19, transport_failures=65)
-        )
+        bucket = _bucket(_row(failed_requests=84, channel_failures=84, upstream_failures=19, transport_failures=65))
         assert (bucket.upstream_failures, bucket.transport_failures) == (19, 65)
 
     def test_null_bucket_is_accepted_for_a_model_with_no_traffic(self):
         # LEFT JOIN over configured models yields a row with no aggregate at all
-        bucket = _bucket_from_row(
+        bucket = _bucket(
             _row(
                 model_group="resident-smoke-model",
                 bucket=None,
@@ -136,10 +145,10 @@ class TestRowMapping:
         # The pre-fix endpoint str()-ed a NULL bucket into "None"; the UI then read
         # new Date("None") as NaN and wrote into a NaN segment index
         with pytest.raises(ValidationError):
-            _bucket_from_row(_row(bucket="None"))
+            _RawBucket.model_validate(_row(bucket="None"))
 
     def test_latency_and_percentiles_pass_through(self):
-        bucket = _bucket_from_row(
+        bucket = _bucket(
             _row(
                 success_requests=10,
                 total_requests=10,
@@ -154,9 +163,7 @@ class TestRowMapping:
         assert (bucket.p50_ms, bucket.p95_ms) == (2028.0, 14486.2)
 
     def test_token_columns_are_independent_of_latency(self):
-        bucket = _bucket_from_row(
-            _row(total_tokens=67499, prompt_tokens=50000, completion_tokens=17499)
-        )
+        bucket = _bucket(_row(total_tokens=67499, prompt_tokens=50000, completion_tokens=17499))
         assert bucket.total_tokens == 67499
         assert bucket.prompt_tokens == 50000
         assert bucket.completion_tokens == 17499
