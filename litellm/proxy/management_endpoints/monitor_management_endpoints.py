@@ -3,7 +3,7 @@
 数据源 PostgreSQL LiteLLM_SpendLogs（startTime 为 naive UTC，桶按北京时间对齐）。
 """
 from datetime import datetime
-from typing import Any, Final, Mapping, Optional
+from typing import Final, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -74,8 +74,7 @@ async def _query_raw(prisma_client, sql_query: str, *args):
     return await prisma_client.db.query_raw(sql_query, *args)
 
 
-def _bucket_from_row(row: Mapping[str, Any]) -> ChannelBucket:
-    raw = _RawBucket.model_validate(dict(row))
+def _bucket_from_row(raw: _RawBucket) -> ChannelBucket:
     channel_failures = raw.channel_failures
     healthy = raw.success_requests + channel_failures
     return ChannelBucket(
@@ -166,10 +165,12 @@ async def channel_summary(
                     -- 403(如上游策略拒绝)是上游失败, 不是调用方鉴权失败。
                     WHEN COALESCE(s.metadata->'error_information'->>'llm_provider', '') NOT IN ('', 'litellm_proxy', 'litellm')
                         THEN 'provider'
-                    -- 平台层直接拒绝且无上游归因: 401/402/403 由代理自身发出, 可证明是调用方责任。
+                    -- 平台层直接拒绝: 401/402/403 且无上游归因, 且异常未带出站调用栈。带栈的是 pass-through
+                    -- 上游自己返回的 401(pass_through_endpoints 记录 httpx.HTTPStatusError), 属渠道侧。
                     -- 只按 error_code 判定, 不按异常类名——ProxyException 太泛, 整类白名单化会漏算真实渠道失败。
                     WHEN COALESCE(s.metadata->'error_information'->>'error_code', '') IN ('401', '402', '403')
                      AND COALESCE(s.metadata->'error_information'->>'llm_provider', '') IN ('', 'litellm_proxy', 'litellm')
+                     AND COALESCE(s.metadata->'error_information'->>'traceback', '') = ''
                         THEN 'client'
                     ELSE 'unclassified'
                 END AS failure_category
@@ -229,4 +230,4 @@ async def channel_summary(
 
     rows = await _query_raw(prisma_client, sql, *args)
 
-    return tuple(_bucket_from_row(row) for row in rows)
+    return tuple(_bucket_from_row(_RawBucket.model_validate(dict(row))) for row in rows)

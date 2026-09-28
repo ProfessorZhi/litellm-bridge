@@ -38,6 +38,7 @@ class _Spend:
     error_class: Optional[str] = None
     llm_provider: Optional[str] = None
     error_code: Optional[str] = None
+    traceback: Optional[str] = None
     duration_ms: int = 1000
     total_tokens: int = 0
     prompt_tokens: int = 0
@@ -48,8 +49,15 @@ class _Spend:
 SCENARIO: Final = (
     _Spend("ok-1", "success", duration_ms=1000, total_tokens=30, prompt_tokens=10, completion_tokens=20),
     _Spend("ok-2", "success", duration_ms=3000, total_tokens=50, prompt_tokens=20, completion_tokens=30),
-    _Spend("net-1", "failure", error_class="ReadError", llm_provider="openai"),
+    _Spend("net-1", "failure", error_class="ReadError", llm_provider=""),
     _Spend("cli-1", "failure", error_code="401", llm_provider="litellm_proxy"),
+    _Spend(
+        "up-1",
+        "failure",
+        error_code="401",
+        error_class="HTTPException",
+        traceback="httpx.HTTPStatusError: 401 Unauthorized for https://upstream.invalid/v1/messages",
+    ),
     _Spend("unk-1", "failure", error_class="SomethingUnmapped", llm_provider="litellm_proxy"),
     _Spend("oth-1", None),
 )
@@ -112,6 +120,7 @@ async def _insert_spend(prisma: Any, model_group: str, spend: _Spend, run_tag: s
             ("error_class", spend.error_class),
             ("llm_provider", spend.llm_provider),
             ("error_code", spend.error_code),
+            ("traceback", spend.traceback),
         )
         if value is not None
     }
@@ -191,10 +200,9 @@ async def test_bucket_lands_in_the_requested_window(monitor: Monitor, proxy_clie
 
 
 async def test_outbound_transport_error_counts_as_channel(monitor: Monitor, proxy_client):
-    """A ReadError raised while reading the upstream stream is channel side."""
+    """A ReadError with no llm_provider, as real rows carry it, is channel side."""
     bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
     assert bucket["transport_failures"] == 1
-    assert bucket["upstream_failures"] == 0
 
 
 async def test_platform_side_failure_is_client_caused_and_still_counted(
@@ -207,14 +215,27 @@ async def test_platform_side_failure_is_client_caused_and_still_counted(
     """
     bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
     assert bucket["client_failures"] == 1
-    assert bucket["failed_requests"] == 3
+    assert bucket["failed_requests"] == 4
+
+
+async def test_upstream_passthrough_401_is_not_caller_caused(
+    monitor: Monitor, proxy_client
+):
+    """A 401 the upstream returned is channel side, even with no provider field.
+
+    The pass-through handler records the upstream httpx error in the traceback,
+    which is what separates it from a 401 the proxy itself issued.
+    """
+    bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
+    assert bucket["upstream_failures"] == 1
+    assert bucket["client_failures"] == 1
 
 
 async def test_unprovable_failure_defaults_to_channel(monitor: Monitor, proxy_client):
     """Anything that cannot be shown to be the caller's fault counts against the channel."""
     bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
     assert bucket["unclassified_failures"] == 1
-    assert bucket["channel_failures"] == 2
+    assert bucket["channel_failures"] == 3
     assert bucket["client_failures"] + bucket["channel_failures"] == bucket["failed_requests"]
 
 
@@ -239,7 +260,7 @@ async def test_counts_partition_every_row(monitor: Monitor, proxy_client):
 async def test_health_excludes_caller_caused_failures(monitor: Monitor, proxy_client):
     """Availability is success over success plus channel failures, not over total."""
     bucket = await monitor.only_bucket(proxy_client, monitor.classify_model)
-    assert bucket["health"] == pytest.approx(2 / 4, abs=1e-4)
+    assert bucket["health"] == pytest.approx(2 / 5, abs=1e-4)
 
 
 async def test_configured_model_without_traffic_is_listed_with_null_bucket(

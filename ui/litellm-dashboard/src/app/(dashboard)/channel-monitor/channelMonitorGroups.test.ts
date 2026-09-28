@@ -84,7 +84,26 @@ describe("groupByModel slot placement", () => {
 
   it("marks a bucket with no requests as no-data rather than healthy", () => {
     const groups = groupByModel(
-      [bucket({ total_requests: 0, success_requests: 0, channel_failures: 0, health: 1 })],
+      [bucket({ bucket: atOffset(-60_000), total_requests: 0, success_requests: 0, channel_failures: 0, health: 1 })],
+      WINDOW_SEC,
+      BUCKET_SEC,
+      NOW,
+    );
+    expect(groups[0].slots[NUM_SEG - 1]?.health).toBeNull();
+  });
+
+  it("marks an all-caller-caused bucket as no-data rather than a red cell", () => {
+    const groups = groupByModel(
+      [
+        bucket({
+          bucket: atOffset(-60_000),
+          total_requests: 1,
+          success_requests: 0,
+          client_failures: 1,
+          channel_failures: 0,
+          health: 0,
+        }),
+      ],
       WINDOW_SEC,
       BUCKET_SEC,
       NOW,

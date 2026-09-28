@@ -98,7 +98,7 @@ export function groupByModel(
       acc.droppedBuckets += 1;
       continue;
     }
-    acc.slots[idx] = { t, health: b.total_requests > 0 ? b.health : null };
+    acc.slots[idx] = { t, health: b.success_requests + b.channel_failures > 0 ? b.health : null };
   }
 
   return Array.from(byModel.values(), (acc) => ({
