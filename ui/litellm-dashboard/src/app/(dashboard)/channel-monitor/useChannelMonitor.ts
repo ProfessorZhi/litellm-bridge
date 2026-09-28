@@ -4,11 +4,22 @@ import useAuthorized from "@/app/(dashboard)/hooks/useAuthorized";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface ChannelBucket {
-  bucket: string;
+  /** 桶起点；已配置但窗口内无请求的模型为 null */
+  bucket: string | null;
   model_group: string;
   total_requests: number;
   success_requests: number;
+  failed_requests: number;
+  /** status 既非 success 也非 failure 的请求（防御未来新增状态） */
+  other_requests: number;
+  /** 能证明是调用方责任的失败 */
+  client_failures: number;
+  /** 其余全部失败，含未分类 */
+  channel_failures: number;
+  /** channel_failures 中能明确归因 provider 的子集 */
   upstream_failures: number;
+  transport_failures: number;
+  unclassified_failures: number;
   avg_latency_ms: number | null;
   avg_ttft_ms: number | null;
   p50_ms: number | null;
@@ -16,6 +27,7 @@ export interface ChannelBucket {
   total_tokens: number;
   prompt_tokens: number;
   completion_tokens: number;
+  /** 渠道可用率 = success / (success + channel_failures)，分母不是 total */
   health: number;
 }
 

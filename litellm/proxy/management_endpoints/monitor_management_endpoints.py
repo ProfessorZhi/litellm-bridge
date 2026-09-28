@@ -1,9 +1,9 @@
 """
-渠道可用性监控端点：按 model_group × 5min 桶聚合健康度/延迟/吞吐量。
-数据源 PostgreSQL LiteLLM_SpendLogs（ASIA/Shanghai 分桶）。
+渠道可用性监控端点：按 model_group × 时间桶聚合健康度/延迟/吞吐量。
+数据源 PostgreSQL LiteLLM_SpendLogs（startTime 为 naive UTC，桶按北京时间对齐）。
 """
 from datetime import datetime
-from typing import Optional, Sequence
+from typing import Any, Final, Mapping, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -14,13 +14,22 @@ from litellm.proxy.spend_tracking.spend_management_endpoints import _is_admin_vi
 
 router = APIRouter()
 
+# startTime 存的是 naive UTC。桶按北京零点对齐，因为平台的额度日界与运营口径都是北京时间。
+_BUCKET_TZ_OFFSET_SECONDS: Final = 8 * 3600
+
 
 class ChannelBucket(BaseModel):
-    bucket: str
+    bucket: Optional[datetime] = None
     model_group: str
     total_requests: int = 0
     success_requests: int = 0
-    upstream_failures: int = 0   # 仅上游/provider 失败(用户自己错误已剔除)
+    failed_requests: int = 0
+    other_requests: int = 0
+    client_failures: int = 0
+    channel_failures: int = 0
+    upstream_failures: int = 0
+    transport_failures: int = 0
+    unclassified_failures: int = 0
     avg_latency_ms: Optional[float] = None
     avg_ttft_ms: Optional[float] = None
     p50_ms: Optional[float] = None
@@ -28,7 +37,28 @@ class ChannelBucket(BaseModel):
     total_tokens: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
-    health: float = 0.0   # success/total
+    health: float = 0.0
+
+
+class _RawBucket(BaseModel):
+    model_group: str
+    bucket: Optional[datetime] = None
+    total_requests: int = 0
+    success_requests: int = 0
+    failed_requests: int = 0
+    other_requests: int = 0
+    client_failures: int = 0
+    channel_failures: int = 0
+    upstream_failures: int = 0
+    transport_failures: int = 0
+    unclassified_failures: int = 0
+    avg_latency: Optional[float] = None
+    avg_ttft: Optional[float] = None
+    p50: Optional[float] = None
+    p95: Optional[float] = None
+    total_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 def _parse_dt(s: str) -> datetime:
@@ -42,6 +72,33 @@ def _parse_dt(s: str) -> datetime:
 
 async def _query_raw(prisma_client, sql_query: str, *args):
     return await prisma_client.db.query_raw(sql_query, *args)
+
+
+def _bucket_from_row(row: Mapping[str, Any]) -> ChannelBucket:
+    raw = _RawBucket.model_validate(dict(row))
+    channel_failures = raw.channel_failures
+    healthy = raw.success_requests + channel_failures
+    return ChannelBucket(
+        bucket=raw.bucket,
+        model_group=raw.model_group,
+        total_requests=raw.total_requests,
+        success_requests=raw.success_requests,
+        failed_requests=raw.failed_requests,
+        other_requests=raw.other_requests,
+        client_failures=raw.client_failures,
+        channel_failures=channel_failures,
+        upstream_failures=raw.upstream_failures,
+        transport_failures=raw.transport_failures,
+        unclassified_failures=raw.unclassified_failures,
+        avg_latency_ms=raw.avg_latency,
+        avg_ttft_ms=raw.avg_ttft,
+        p50_ms=raw.p50,
+        p95_ms=raw.p95,
+        total_tokens=raw.total_tokens,
+        prompt_tokens=raw.prompt_tokens,
+        completion_tokens=raw.completion_tokens,
+        health=round(raw.success_requests / healthy, 4) if healthy else 0.0,
+    )
 
 
 @router.get(
@@ -66,70 +123,110 @@ async def channel_summary(
     start_dt = _parse_dt(start_time)
     end_dt = _parse_dt(end_time)
 
-    args: list = [start_dt, end_dt, model, bucket_seconds]
+    args: list = [start_dt, end_dt, model, bucket_seconds, _BUCKET_TZ_OFFSET_SECONDS]
 
-    # 渠道列表 = 实际配置的模型(LiteLLM_ProxyModelTable.model_name)；假/未知 model_group 不匹配则排除
+    # 渠道列表 = 实际配置的模型(LiteLLM_ProxyModelTable.model_name)。
+    # DISTINCT 是必须的:同一 model_name 可以有多条部署记录,不 DISTINCT 会让每条部署各算一遍,
+    # 把请求数放大到部署份数倍。
     sql = f"""
+        WITH configured_models AS (
+            SELECT DISTINCT model_name
+            FROM "LiteLLM_ProxyModelTable"
+            WHERE ($3::text IS NULL OR model_name = $3)
+        ),
+        classified_requests AS (
+            SELECT
+                COALESCE(NULLIF(s.model_group, ''), s.model) AS model_group,
+                -- startTime 是 naive UTC: epoch 直接取用即可, 不能再做时区转换(转换会把桶整体平移到未来)。
+                -- offset 只决定桶的相位, 净位移为零: 先加 offset 对齐到北京边界, 再减回去。
+                to_timestamp(floor((extract(epoch FROM s."startTime") + $5::int) / $4::int) * $4::int - $5::int) AS bucket,
+                s.status,
+                s.request_duration_ms,
+                s."completionStartTime",
+                s."startTime",
+                s."endTime",
+                s.total_tokens,
+                s.prompt_tokens,
+                s.completion_tokens,
+                -- 失败分类只在这里算一次, 下游聚合一律用 FILTER 引用它, 避免口径在多处漂移。
+                -- 口径: 只豁免"能证明是调用方责任"的失败; 证明不了的一律算渠道失败(默认计入)。
+                CASE
+                    WHEN s.status IS DISTINCT FROM 'failure' THEN NULL
+                    WHEN COALESCE(s.metadata->'error_information'->>'error_class', '') IN (
+                        'BudgetExceededError', 'ContextWindowExceededError', 'KeyModelAccessDenied',
+                        'KeyNotFoundError', 'ProxyModelNotFoundError'
+                    ) THEN 'client'
+                    -- 出站传输失败(如 httpx.ReadError 在上游流读取时抛出)属渠道侧。
+                    WHEN COALESCE(s.metadata->'error_information'->>'error_class', '') IN (
+                        'APIConnectionError', 'ConnectError', 'ConnectTimeout', 'LocalProtocolError',
+                        'PoolTimeout', 'ReadError', 'ReadTimeout', 'RemoteProtocolError', 'Timeout',
+                        'WriteError', 'WriteTimeout'
+                    ) THEN 'transport'
+                    -- 有真实厂商归因即算 provider。放在 error_code 判据之前, 因为带 provider 的
+                    -- 403(如上游策略拒绝)是上游失败, 不是调用方鉴权失败。
+                    WHEN COALESCE(s.metadata->'error_information'->>'llm_provider', '') NOT IN ('', 'litellm_proxy', 'litellm')
+                        THEN 'provider'
+                    -- 平台层直接拒绝且无上游归因: 401/402/403 由代理自身发出, 可证明是调用方责任。
+                    -- 只按 error_code 判定, 不按异常类名——ProxyException 太泛, 整类白名单化会漏算真实渠道失败。
+                    WHEN COALESCE(s.metadata->'error_information'->>'error_code', '') IN ('401', '402', '403')
+                     AND COALESCE(s.metadata->'error_information'->>'llm_provider', '') IN ('', 'litellm_proxy', 'litellm')
+                        THEN 'client'
+                    ELSE 'unclassified'
+                END AS failure_category
+            FROM "LiteLLM_SpendLogs" s
+            -- 转成 naive UTC 再比较, 否则比较结果会随连接会话的 TimeZone 漂移, 窗口被静默平移。
+            WHERE s."startTime" >= ($1::timestamptz AT TIME ZONE 'UTC')
+              AND s."startTime" <  ($2::timestamptz AT TIME ZONE 'UTC')
+        ),
+        aggregated AS (
+            SELECT
+                model_group,
+                bucket,
+                COUNT(*) AS total_requests,
+                COUNT(*) FILTER (WHERE status = 'success') AS success_requests,
+                COUNT(*) FILTER (WHERE status = 'failure') AS failed_requests,
+                COUNT(*) FILTER (WHERE status IS DISTINCT FROM 'success' AND status IS DISTINCT FROM 'failure') AS other_requests,
+                COUNT(*) FILTER (WHERE failure_category = 'client') AS client_failures,
+                COUNT(*) FILTER (WHERE failure_category IN ('provider', 'transport', 'unclassified')) AS channel_failures,
+                COUNT(*) FILTER (WHERE failure_category = 'provider') AS upstream_failures,
+                COUNT(*) FILTER (WHERE failure_category = 'transport') AS transport_failures,
+                COUNT(*) FILTER (WHERE failure_category = 'unclassified') AS unclassified_failures,
+                -- 延迟与吞吐统计在成功请求上: 失败请求大多毫秒级返回, 混进来会把响应时间压低。
+                AVG(request_duration_ms) FILTER (WHERE status = 'success')::float8 AS avg_latency,
+                AVG(CASE WHEN status = 'success' AND "completionStartTime" IS NOT NULL AND "completionStartTime" < "endTime"
+                         THEN extract(epoch FROM ("completionStartTime" - "startTime")) * 1000
+                         ELSE NULL END)::float8 AS avg_ttft,
+                percentile_cont(0.5) WITHIN GROUP (ORDER BY request_duration_ms)
+                    FILTER (WHERE status = 'success')::float8 AS p50,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY request_duration_ms)
+                    FILTER (WHERE status = 'success')::float8 AS p95,
+                COALESCE(SUM(total_tokens) FILTER (WHERE status = 'success'), 0)::bigint AS total_tokens,
+                COALESCE(SUM(prompt_tokens) FILTER (WHERE status = 'success'), 0)::bigint AS prompt_tokens,
+                COALESCE(SUM(completion_tokens) FILTER (WHERE status = 'success'), 0)::bigint AS completion_tokens
+            FROM classified_requests
+            GROUP BY model_group, bucket
+        )
         SELECT
             m.model_name AS model_group,
-            to_timestamp(floor(extract(epoch FROM s."startTime" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')/ $4::int) * $4::int) AS bucket,
-            COUNT(s.request_id) AS total_requests,
-            COUNT(s.request_id) FILTER (WHERE s.status = 'success') AS success_requests,
-            COUNT(s.request_id) FILTER (WHERE s.status = 'failure'
-                -- 双保险:只有"真实上游"才算上游错误。用户侧(平台代理层)错误一律剔除。
-                -- 判据1:llm_provider 是真实上游厂商(非 litellm_proxy / litellm / 空)
-                AND s.metadata->'error_information'->>'llm_provider' IS NOT NULL AND s.metadata->'error_information'->>'llm_provider' <> '' AND s.metadata->'error_information'->>'llm_provider' NOT IN ('litellm_proxy','litellm')
-                -- 判据2(双保险):error_class 不在"用户侧(平台层)"白名单内(权限/预算/平台认证/模型不存在/上下文超长等)
-                -- 注意:AuthenticationError 是"上游 provider"认证失败(PROV-006,如 Anthropic 令牌过期),应计入上游,不放白名单。
-                AND COALESCE(s.metadata->'error_information'->>'error_class','') NOT IN ('BudgetExceededError','KeyModelAccessDenied','KeyNotFoundError','ProxyException','ProxyModelNotFoundError','ContextWindowExceededError')
-            ) AS upstream_failures,
-            AVG(s.request_duration_ms) AS avg_latency,
-            AVG(CASE WHEN s."completionStartTime" IS NOT NULL AND s."completionStartTime" < s."endTime"
-                     THEN extract(epoch FROM (s."completionStartTime" - s."startTime"))*1000
-                     ELSE NULL END) AS avg_ttft,
-            percentile_cont(0.5) WITHIN GROUP (ORDER BY s.request_duration_ms) AS p50,
-            percentile_cont(0.95) WITHIN GROUP (ORDER BY s.request_duration_ms) AS p95,
-            COALESCE(SUM(s.total_tokens),0) AS total_tokens,
-            COALESCE(SUM(s.prompt_tokens),0) AS prompt_tokens,
-            COALESCE(SUM(s.completion_tokens),0) AS completion_tokens
-        FROM "LiteLLM_ProxyModelTable" m
-        LEFT JOIN "LiteLLM_SpendLogs" s
-          ON COALESCE(NULLIF(s.model_group, ''), s.model) = m.model_name
-         AND s."startTime" >= $1::timestamptz
-         AND s."startTime" < $2::timestamptz
-         -- 剔除用户自己的错误(平台代理层:401 无效key/402 超预算/403 key配错/模型不存在/上下文超长等)。
-         -- 双保险:上游 = failure 且 llm_provider 是真实厂商 且 error_class 不在"用户侧白名单"。
-         -- AuthenticationError(上游 provider 认证失败,PROV-006)不计入白名单,归上游显示。
-         AND NOT (s.status = 'failure' AND (
-                 (s.metadata->'error_information'->>'llm_provider' IS NULL OR s.metadata->'error_information'->>'llm_provider' = '' OR s.metadata->'error_information'->>'llm_provider' IN ('litellm_proxy','litellm'))
-                 OR COALESCE(s.metadata->'error_information'->>'error_class','') IN ('BudgetExceededError','KeyModelAccessDenied','KeyNotFoundError','ProxyException','ProxyModelNotFoundError','ContextWindowExceededError')
-             ))
-        WHERE ($3::text IS NULL OR m.model_name = $3)
-        GROUP BY m.model_name, bucket
-        ORDER BY bucket ASC
+            a.bucket,
+            COALESCE(a.total_requests, 0)::bigint AS total_requests,
+            COALESCE(a.success_requests, 0)::bigint AS success_requests,
+            COALESCE(a.failed_requests, 0)::bigint AS failed_requests,
+            COALESCE(a.other_requests, 0)::bigint AS other_requests,
+            COALESCE(a.client_failures, 0)::bigint AS client_failures,
+            COALESCE(a.channel_failures, 0)::bigint AS channel_failures,
+            COALESCE(a.upstream_failures, 0)::bigint AS upstream_failures,
+            COALESCE(a.transport_failures, 0)::bigint AS transport_failures,
+            COALESCE(a.unclassified_failures, 0)::bigint AS unclassified_failures,
+            a.avg_latency, a.avg_ttft, a.p50, a.p95,
+            COALESCE(a.total_tokens, 0)::bigint AS total_tokens,
+            COALESCE(a.prompt_tokens, 0)::bigint AS prompt_tokens,
+            COALESCE(a.completion_tokens, 0)::bigint AS completion_tokens
+        FROM configured_models m
+        LEFT JOIN aggregated a ON a.model_group = m.model_name
+        ORDER BY m.model_name, a.bucket
     """
 
     rows = await _query_raw(prisma_client, sql, *args)
 
-    result = []
-    for r in rows:
-        total = r.get("total_requests", 0) or 0
-        success = r.get("success_requests", 0) or 0
-        upstream_failures = r.get("upstream_failures", 0) or 0
-        health = (success / total) if total else 0.0
-        result.append(ChannelBucket(
-            bucket=str(r.get("bucket", "")),
-            model_group=str(r.get("model_group", "")),
-            total_requests=total,
-            success_requests=success,
-            upstream_failures=upstream_failures,
-            avg_latency_ms=r.get("avg_latency"),
-            avg_ttft_ms=r.get("avg_ttft"),
-            p50_ms=r.get("p50"),
-            p95_ms=r.get("p95"),
-            total_tokens=r.get("total_tokens", 0) or 0,
-            prompt_tokens=r.get("prompt_tokens", 0) or 0,
-            completion_tokens=r.get("completion_tokens", 0) or 0,
-            health=round(health, 4),
-        ))
-    return result
+    return tuple(_bucket_from_row(row) for row in rows)

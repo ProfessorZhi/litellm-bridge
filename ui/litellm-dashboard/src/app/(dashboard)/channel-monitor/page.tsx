@@ -2,7 +2,8 @@
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useChannelMonitor, WINDOW_OPTIONS, type ChannelBucket } from "./useChannelMonitor";
+import { channelAvailability, groupByModel } from "./channelMonitorGroups";
+import { useChannelMonitor, WINDOW_OPTIONS } from "./useChannelMonitor";
 
 const NORMAL = 90; // ≥90% 绿
 const WARN = 50; // 50-90% 黄
@@ -24,49 +25,6 @@ function fmtPct(p: number | null): string {
 function fmtSec(ms: number | null): string {
   if (ms == null) return "-";
   return ms >= 1000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms) + "ms";
-}
-
-interface Group {
-  model: string;
-  total: number;
-  success: number;
-  failed: number;
-  avgLatency: number;
-  avgTtft: number;
-  totalTokens: number;
-  buckets: { t: number; health: number | null }[];
-}
-
-function groupByModel(buckets: ChannelBucket[], windowSec: number, bucketSec: number, now: number): Group[] {
-  const map = new Map<string, Group>();
-  for (const b of buckets) {
-    const model = b.model_group || "unk";
-    let g = map.get(model);
-    if (!g) {
-      g = { model, total: 0, success: 0, failed: 0, avgLatency: 0, avgTtft: 0, totalTokens: 0, buckets: [] };
-      map.set(model, g);
-    }
-    g.total += b.total_requests;
-    g.success += b.success_requests;
-    g.failed += b.upstream_failures ?? 0;
-    g.totalTokens += b.total_tokens;
-    g.avgLatency += b.avg_latency_ms ?? 0;
-    g.avgTtft += b.avg_ttft_ms ?? 0;
-    const bt = new Date(b.bucket).getTime();
-    const numSeg = Math.floor(windowSec / bucketSec);
-    const idx = numSeg - 1 - Math.floor((now - bt) / (bucketSec * 1000));
-    const health = b.total_requests > 0 ? b.health : null;
-    g.buckets[idx] = { t: bt, health };
-  }
-  // 归一平均 latency / ttft
-  for (const g of map.values()) {
-    const n = buckets.filter((b) => b.model_group === g.model).length;
-    if (n > 0) {
-      g.avgLatency = g.avgLatency / n;
-      g.avgTtft = g.avgTtft / n;
-    }
-  }
-  return Array.from(map.values());
 }
 
 function Donut({ pct }: { pct: number | null }) {
@@ -95,12 +53,14 @@ export default function ChannelMonitorPage() {
   const { buckets, loading, error, refresh, windowSec, changeWindow, lastUpdated } = useChannelMonitor();
   const now = Date.now();
   const bucketSec = WINDOW_OPTIONS.find((o) => o.windowSec === windowSec)?.bucketSec ?? 300;
-  // 固定按 windowSec 铺满格子 (7天=28格, 无数据也显示灰格)
-  const rangeStart = now - windowSec * 1000;
-  const rangeEnd = now;
-  const segMs = bucketSec * 1000;
   const numSeg = Math.floor(windowSec / bucketSec);
   const groups = groupByModel(buckets, windowSec, bucketSec, now);
+
+  // 桶落在窗口外说明后端时间与窗口对不上，格子会静默缺失
+  if (process.env.NODE_ENV !== "production") {
+    const dropped = groups.reduce((n, g) => n + g.droppedBuckets, 0);
+    if (dropped > 0) console.warn(`channel-monitor: ${dropped} 个桶落在窗口外，未渲染`);
+  }
 
   const Stat = ({ label, value, color }: { label: string; value: string | number; color?: string }) => (
     <div className="flex flex-col items-center rounded bg-muted/40 px-2 py-2">
@@ -114,7 +74,7 @@ export default function ChannelMonitorPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">模型健康监控</h1>
-          <p className="text-sm text-muted-foreground">按模型查看健康度、延迟与请求</p>
+          <p className="text-sm text-muted-foreground">按模型查看渠道可用率、延迟与请求</p>
         </div>
         <div className="flex items-center gap-2">
           <select
@@ -141,8 +101,8 @@ export default function ChannelMonitorPage() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         {groups.map((g) => {
-          const avail = g.total > 0 ? (g.success / g.total) * 100 : null;
-          const failed = g.failed; // 仅上游/provider 失败,用户自己错误(401/402/403)不计入
+          // 分母是 成功+渠道失败，不是总请求：用户侧失败(401/402/403 等)不算渠道不可用
+          const avail = channelAvailability(g);
           return (
             <Card key={g.model} className="overflow-hidden">
               {/* 顶部状态色条 */}
@@ -164,21 +124,23 @@ export default function ChannelMonitorPage() {
                   <Donut pct={avail} />
                   <div className="grid flex-1 grid-cols-2 gap-2">
                     <Stat label="总请求" value={g.total} />
-                    <Stat label="失败请求" value={failed} color={failed > 0 ? "text-red-600" : undefined} />
-                    <Stat label="响应时间" value={fmtSec(g.avgLatency)} />
-                    <Stat label="首token" value={fmtSec(g.avgTtft)} />
+                    {/* 失败请求 = 全部 status='failure'；渠道失败 = 其中排除可证明属调用方责任的部分 */}
+                    <Stat label="失败请求" value={g.failed} color={g.failed > 0 ? "text-red-600" : undefined} />
+                    <Stat label="响应时间" value={fmtSec(g.latency)} />
+                    <Stat label="首token" value={fmtSec(g.ttft)} />
                     <Stat label="总token" value={fmtToken(g.totalTokens)} />
+                    <Stat label="渠道失败" value={g.channelFailed} color={g.channelFailed > 0 ? "text-red-600" : undefined} />
                   </div>
                 </div>
 
-                {/* 健康度时间条 */}
+                {/* 渠道可用率时间条 */}
                 <div className="mt-4">
                   <div className="text-[11px] text-muted-foreground">
-                    可用率 {fmtPct(avail)}
+                    渠道可用率 {fmtPct(avail)}
                   </div>
                   <div className="mt-1 flex gap-[2px]">
                     {Array.from({ length: numSeg }).map((_, i) => {
-                      const seg = g.buckets[i];
+                      const seg = g.slots[i];
                       const pct = seg && seg.health != null ? seg.health * 100 : null;
                       return (
                         <div
@@ -224,17 +186,4 @@ function fmtTime(ts: number): string {
   const mo = (d.getMonth() + 1).toString().padStart(2, "0");
   const dd = d.getDate().toString().padStart(2, "0");
   return `${mo}-${dd} ${h}:${m}`;
-}
-
-function curTimeText(offsetMs: number): string {
-  const d = new Date(Date.now() + offsetMs);
-  const h = d.getHours().toString().padStart(2, "0");
-  const m = d.getMinutes().toString().padStart(2, "0");
-  // 跨度 > 1 天时显示日期 (MM-DD HH:MM)，否则只 HH:MM
-  if (Math.abs(offsetMs) >= 86400000) {
-    const mo = (d.getMonth() + 1).toString().padStart(2, "0");
-    const dd = d.getDate().toString().padStart(2, "0");
-    return `${mo}-${dd} ${h}:${m}`;
-  }
-  return `${h}:${m}`;
 }
