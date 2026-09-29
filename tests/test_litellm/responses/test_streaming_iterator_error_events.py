@@ -19,7 +19,6 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-
 import litellm
 from litellm.exceptions import MidStreamFallbackError
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
@@ -205,6 +204,7 @@ async def test_async_iterator_error_after_first_chunk_carries_generated_content(
     )
 
     chunks = []
+
     async def _drain():
         async for chunk in iterator:
             chunks.append(chunk)
@@ -438,6 +438,19 @@ def test_generic_type_still_classifies_when_the_event_carries_no_code():
     assert _status_code_for_error_fields("invalid_request_error", None) == 400
     assert _status_code_for_error_fields("server_error", None) == 500
     assert _status_code_for_error_fields(None, None) == 500
+
+
+def test_known_code_is_not_lifted_to_500_by_a_generic_type():
+    """Negative control for the retriable-500 change.
+
+    request_timeout had to stop being a 400, but a code the table knows must keep
+    its own status, even beside a generic type. Without this the fix would be
+    indistinguishable from "coded errors are now 500".
+    """
+    assert _status_code_for_error_fields("invalid_request_error", "context_length_exceeded") == 400
+    assert _status_code_for_error_fields("server_error", "context_length_exceeded") == 400
+    assert _status_code_for_error_fields("invalid_request_error", "content_policy_violation") == 400
+    assert _status_code_for_error_fields("invalid_request_error", "model_not_found") == 400
 
 
 def test_maybe_raise_for_error_event_wraps_a_stream_cut_in_transit_for_mid_stream_fallback():

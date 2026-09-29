@@ -472,7 +472,9 @@ async def test_failure_logging_does_not_park_the_iterating_loop(monkeypatch):
     finally:
         ticker.cancel()
 
-    assert ticks_while_failing >= 3, f"the iterating loop only ran {ticks_while_failing} callbacks during failure logging"
+    assert ticks_while_failing >= 3, (
+        f"the iterating loop only ran {ticks_while_failing} callbacks during failure logging"
+    )
 
 
 @pytest.mark.asyncio
