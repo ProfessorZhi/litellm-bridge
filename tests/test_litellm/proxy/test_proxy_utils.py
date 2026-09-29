@@ -1,8 +1,10 @@
 import datetime as real_datetime
 import smtplib
+from typing import Final
 
 import pytest
 from fastapi import HTTPException
+from prisma.errors import DataError
 
 from litellm.caching.caching import DualCache
 from litellm.integrations.custom_guardrail import CustomGuardrail
@@ -11,9 +13,9 @@ from litellm.proxy.utils import ProxyLogging
 from litellm.types.guardrails import GuardrailEventHooks
 
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from litellm.proxy.utils import get_custom_url, join_paths
+from litellm.proxy.utils import _create_spend_logs_with_poison_isolation, get_custom_url, join_paths
 
 
 def test_get_custom_url(monkeypatch):
@@ -1878,3 +1880,82 @@ async def test_proxy_only_error_5xx_keeps_traceback_and_runs_sync_callbacks(monk
         Logging.failure_handler = orig_sync_failure
 
     assert "test_proxy_utils" in captured["async_traceback"]
+
+
+def _spend_logs_repo_double(poisoned_request_ids: frozenset[str], error: Exception) -> MagicMock:
+    """A ``SpendLogsRepository`` stand-in whose ``table.create_many`` rejects any
+    statement carrying a poisoned row, exactly as a single INSERT does."""
+
+    def _reject_poisoned_statements(data, skip_duplicates):
+        if any(row.get("request_id") in poisoned_request_ids for row in data):
+            raise error
+
+    repo: Final = MagicMock()
+    repo.table.create_many = AsyncMock(side_effect=_reject_poisoned_statements)
+    return repo
+
+
+def _attempted_statement_request_ids(repo: MagicMock) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        tuple(row.get("request_id") for row in call.kwargs["data"])
+        for call in repo.table.create_many.call_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_poison_isolation_reraises_a_recovery_mode_postgres_fatal(monkeypatch):
+    """A spend-log row survives a DB outage instead of being discarded as poison."""
+    outage: Final = DataError({}, message="FATAL: the database system is in recovery mode")
+    repo: Final = _spend_logs_repo_double(frozenset({"req-outage"}), outage)
+    dropped: Final = MagicMock()
+    monkeypatch.setattr("litellm.proxy.utils.spend_log_error", dropped)
+
+    with pytest.raises(DataError):
+        await _create_spend_logs_with_poison_isolation(repo, ({"request_id": "req-outage"},), failure_budget=8)
+
+    dropped.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_poison_isolation_still_drops_one_genuinely_poisoned_row(monkeypatch):
+    """A row Postgres refuses on its own bytes is dropped and logged once, so
+    the rows around it keep persisting instead of being lost with the batch."""
+    poison: Final = DataError({}, message='invalid byte sequence for encoding "UTF8": 0x00')
+    repo: Final = _spend_logs_repo_double(frozenset({"req-poison"}), poison)
+    dropped: Final = MagicMock()
+    monkeypatch.setattr("litellm.proxy.utils.spend_log_error", dropped)
+
+    remaining: Final = await _create_spend_logs_with_poison_isolation(
+        repo, ({"request_id": "req-poison"},), failure_budget=8
+    )
+
+    assert remaining == 7
+    dropped.assert_called_once()
+    assert "dropping spend log row" in dropped.call_args.args[0]
+    assert dropped.call_args.args[1] == "req-poison"
+
+
+@pytest.mark.asyncio
+async def test_poison_isolation_bisects_a_mixed_batch_and_keeps_the_clean_rows(monkeypatch):
+    """One poisoned row must not take its batch down with it: the good rows are
+    written on their own and only the poisoned row is dropped."""
+    poison: Final = DataError({}, message='invalid byte sequence for encoding "UTF8": 0x00')
+    poisoned: Final = frozenset({"req-poison"})
+    repo: Final = _spend_logs_repo_double(poisoned, poison)
+    dropped: Final = MagicMock()
+    monkeypatch.setattr("litellm.proxy.utils.spend_log_error", dropped)
+
+    remaining: Final = await _create_spend_logs_with_poison_isolation(
+        repo,
+        ({"request_id": "req-a"}, {"request_id": "req-poison"}, {"request_id": "req-b"}),
+        failure_budget=8,
+    )
+
+    assert remaining == 5
+    succeeded: Final = tuple(
+        batch for batch in _attempted_statement_request_ids(repo) if not set(batch) & poisoned
+    )
+    assert ("req-a",) in succeeded
+    assert ("req-b",) in succeeded
+    dropped.assert_called_once()
+    assert dropped.call_args.args[1] == "req-poison"
