@@ -1,5 +1,6 @@
 
 from datetime import datetime
+from typing import Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2047,3 +2048,56 @@ async def test_spend_counters_keep_every_granted_group_when_the_deployment_is_un
     )
 
     assert charged == ("premium", "tier0")
+
+
+def _responses_failure_request_data() -> dict:
+    mock_logging_obj = MagicMock()
+    mock_logging_obj.start_time = datetime.now()
+    mock_logging_obj.litellm_trace_id = "trace-id-from-logging-obj"
+    mock_logging_obj.model_call_details = {
+        "standard_logging_object": {
+            "call_type": "aresponses",
+            "model": "gpt-4o",
+            "model_id": "deployment-id-from-sl",
+            "model_group": "gpt-5-mini",
+            "api_base": "https://api.openai.com/v1",
+            "custom_llm_provider": "openai",
+            "metadata": {},
+            "hidden_params": {},
+            "model_map_information": {},
+        }
+    }
+    return {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "metadata": {},
+        "proxy_server_request": {},
+        "litellm_logging_obj": mock_logging_obj,
+    }
+
+
+@pytest.mark.asyncio
+async def test_aresponses_failure_row_reaches_the_write_with_its_call_type(monkeypatch):
+    """A failed Responses call carries no call_type on the request body, so the
+    standard logging object is the only carrier. An empty call_type silently
+    costs the row its immediate flush, which the Responses id lookup depends on."""
+    logger = _ProxyDBLogger()
+    flushed = MagicMock()
+    enqueued = AsyncMock()
+    monkeypatch.setattr("litellm.proxy.utils.request_spend_log_flush", flushed)
+    monkeypatch.setattr("litellm.proxy.utils.enqueue_spend_logs", enqueued)
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", MagicMock())
+    monkeypatch.setattr("litellm.proxy.proxy_server.disable_spend_logs", False)
+
+    await logger.async_post_call_failure_hook(
+        request_data=_responses_failure_request_data(),
+        original_exception=Exception("provider error"),
+        user_api_key_dict=UserAPIKeyAuth(api_key="sk-test-key", user_id="test_user_id"),
+    )
+
+    enqueued.assert_awaited_once()
+    payload: Final = enqueued.call_args.args[1][0]
+    assert payload["call_type"] == "aresponses"
+    assert payload["model_group"] == "gpt-5-mini"
+    assert payload["model_id"] == "deployment-id-from-sl"
+    flushed.assert_called_once()
