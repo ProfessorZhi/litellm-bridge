@@ -403,9 +403,15 @@ async def test_transport_error_failure_logging_runs_on_the_iterating_loop(monkey
 
 @pytest.mark.asyncio
 async def test_failure_logging_can_await_state_bound_to_the_iterating_loop(monkeypatch):
-    """The failure callback awaits state the request's own loop owns, the spend-update queue
-    among it. Dispatched onto a foreign loop that await raises RuntimeError, which the caller
-    swallows, so the failure never reaches the spend log."""
+    """The failure callback must be able to await state the request's own loop owns.
+
+    Awaiting loop-bound state is the ordinary shape of any failure handler that
+    has async work to do. It is also a real lifecycle defect when the handler is
+    dispatched onto a foreign loop, because the await then raises RuntimeError
+    and the caller swallows it. What this asserts is the loop the handler runs
+    on. It does not on its own establish that any production missing spend-log
+    row came from here; that needs a persisted row to be absent, which this test
+    does not have."""
     spend_queue: asyncio.Queue = asyncio.Queue()
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(spend_queue.get(), timeout=0.01)
