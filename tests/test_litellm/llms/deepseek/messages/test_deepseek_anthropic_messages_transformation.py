@@ -192,7 +192,7 @@ def test_deepseek_anthropic_messages_preserves_thinking_and_sanitizes_custom_too
 # --- LIT-0220: inline tool_definition blocks must be converted WITHOUT silent loss ---
 import pytest
 
-_TOOL = "mcp__claude_ai_Claude_Docs__batch"
+_TOOL = "mcp__example__deferred_batch"
 
 
 def _messages_with(block, *, second_block=None):
