@@ -475,3 +475,77 @@ def test_large_multi_system_tool_addition_round_trips():
     req = _transform(msgs)
     assert any(t.get("name") == "db_query" for t in req["tools"])
     assert req["messages"][2]["content"][0]["text"] == pad
+
+
+# --- LIT-0220 RUN-0019: tools[] container validation + protocol-scoped guard ---
+# A `tools[]` entry is a *declaration container*, identified by its own `type`
+# field. A content block sitting there is not a declaration and must be refused.
+# The guard walks only protocol block positions, so legal user data that merely
+# mentions `tool_definition` is never rejected.
+
+
+def test_tool_definition_entry_in_tools_is_rejected():
+    # RED before the tools[] container check: the block was forwarded downstream.
+    tools = [{"type": "tool_definition",
+              "definition": {"name": "x", "input_schema": {"type": "object", "properties": {}}}}]
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": "hi"}], tools=tools)
+
+
+def test_tool_addition_entry_in_tools_is_rejected():
+    tools = [{"type": "tool_addition",
+              "tool": {"type": "tool_definition",
+                       "definition": {"name": "x", "input_schema": {"type": "object", "properties": {}}}}}]
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": "hi"}], tools=tools)
+
+
+def test_schema_property_named_tool_definition_is_allowed():
+    # a schema *property* called tool_definition is legal user data, not a block
+    tools = [{"name": "t", "description": "d",
+              "input_schema": {"type": "object",
+                               "properties": {"tool_definition": {"type": "string"},
+                                              "tool_reference": {"type": "string"}}}}]
+    req = _transform([{"role": "user", "content": "hi"}], tools=tools)
+    assert any(t.get("name") == "t" for t in req["tools"])
+
+
+def test_custom_typed_tool_declaration_with_that_property_is_allowed():
+    tools = [{"type": "custom", "name": "t", "description": "d",
+              "input_schema": {"type": "object",
+                               "properties": {"tool_definition": {"type": "string"}}}}]
+    req = _transform([{"role": "user", "content": "hi"}], tools=tools)
+    assert req["tools"][0].get("name") == "t"
+
+
+def test_tool_use_input_mentioning_tool_definition_is_allowed():
+    # tool_use.input is user JSON, not a protocol position: must not be rejected
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_1", "name": "t",
+             "input": {"note": "the block is called tool_definition",
+                       "shape": {"type": "tool_definition"}}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1",
+             "content": [{"type": "text", "text": "tool_definition is expected here"}]}]},
+    ]
+    req = _transform(messages)
+    assert req["messages"] == messages
+
+
+def test_tool_result_text_mentioning_tool_definition_is_allowed():
+    messages = [{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t",
+         "content": [{"type": "text", "text": "unknown variant `tool_definition`"}]}]}]
+    req = _transform(messages)
+    assert req["messages"] == messages
+
+
+def test_deep_wrapping_still_fails_closed():
+    # the bounded protocol walk must still catch a triple-wrapped definition
+    blk = {"role": "system", "content": [{"type": "tool_addition", "tool": {
+        "type": "tool_addition", "tool": {"type": "tool_addition", "tool": {
+            "type": "tool_definition", "definition": {"name": "x", "input_schema": {}}}}}}]}
+    with pytest.raises(litellm.BadRequestError):
+        _transform([blk])

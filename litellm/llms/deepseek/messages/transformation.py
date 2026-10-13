@@ -205,32 +205,72 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             return {**part, "tool": {"type": TOOL_REFERENCE_BLOCK, "name": tool_name}}
         return {"type": TOOL_REFERENCE_BLOCK, "tool_name": tool_name}
 
-    @staticmethod
-    def _find_tool_definitions(node: Any, path: str = "", out=None):
-        """Recursively locate any remaining `tool_definition` block, with its path.
+    # Only these positions can carry a content block. Anything else that happens
+    # to contain a "type": "tool_definition" pair is user data (e.g. inside
+    # `tool_use.input` or a JSON Schema property), which the provider never
+    # parses as a block — so it is neither scanned nor rejected.
+    _PROTOCOL_WRAPPER_TYPES: Final = ("tool_result", "tool_addition")
+    _MAX_PROTOCOL_DEPTH: Final = 8
 
-        Used as a final guard: after the supported shapes have been converted, any
-        `tool_definition` still present (e.g. nested inside ``tool_result.content[]``
-        or under a double ``tool_addition``) must NOT be forwarded to the provider —
-        that would be an unhandled illegal block. We fail closed with a client 400
-        that names the exact path instead, so nothing is dropped silently and the
-        provider never sees a shape we did not understand.
+    @classmethod
+    def _scan_protocol_blocks(cls, node: Any, path: str, depth: int, out: list) -> None:
+        """Walk only protocol block positions, collecting illegal `tool_definition`s.
+
+        A full recursive walk of the request body would be both slower (it runs on
+        the hot path of every request, inline block or not) and *wrong*: it would
+        reject legal user content that merely contains the string ``tool_definition``
+        — a schema property name, a ``tool_use.input`` value, a tool result payload.
+        So we follow only the three positions where the provider expects a content
+        block: ``messages[].content[]``, a ``tool_result``'s nested ``content[]``,
+        and a ``tool_addition``'s ``tool``. Depth is bounded.
         """
+        if depth > cls._MAX_PROTOCOL_DEPTH:
+            return
+        if isinstance(node, list):
+            for i, value in enumerate(node):
+                cls._scan_protocol_blocks(value, "%s[%d]" % (path, i), depth, out)
+            return
+        if not isinstance(node, Mapping):
+            return
+        if node.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
+            out.append(path)
+            return
+        # a message envelope: messages[i] -> content[]
+        if "role" in node and isinstance(node.get("content"), list):
+            cls._scan_protocol_blocks(node["content"], path + ".content", depth + 1, out)
+        if node.get("type") in cls._PROTOCOL_WRAPPER_TYPES:
+            if isinstance(node.get("content"), list):
+                cls._scan_protocol_blocks(node["content"], path + ".content", depth + 1, out)
+            if isinstance(node.get("tool"), Mapping):
+                cls._scan_protocol_blocks(node["tool"], path + ".tool", depth + 1, out)
+
+    @classmethod
+    def _find_tool_definitions(cls, messages: Any, path: str = "messages", out=None):
+        """Illegal `tool_definition` blocks remaining in protocol positions."""
         if out is None:
             out = []
-        if isinstance(node, Mapping):
-            if node.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
-                out.append(path or "$")
-            for key, value in node.items():
-                if key in ("tools",):
-                    continue
-                DeepSeekAnthropicMessagesConfig._find_tool_definitions(
-                    value, "%s.%s" % (path, key), out)
-        elif isinstance(node, list):
-            for i, value in enumerate(node):
-                DeepSeekAnthropicMessagesConfig._find_tool_definitions(
-                    value, "%s[%d]" % (path, i), out)
+        cls._scan_protocol_blocks(messages, path, 0, out)
         return out
+
+    @classmethod
+    def _invalid_tool_declarations(cls, tools: Any) -> list:
+        """Reject ``tools[]`` entries that are protocol blocks, not declarations.
+
+        A ``tools[]`` entry is a *declaration container*: it is identified by its
+        own ``type`` field. We look at that field only and never walk the entry's
+        ``input_schema`` — a property or description that happens to contain the
+        text ``tool_definition`` is legal user data and must not be rejected.
+        """
+        bad: Final = []
+        if not isinstance(tools, list):
+            return bad
+        for i, tool in enumerate(tools):
+            if isinstance(tool, Mapping) and tool.get("type") in (
+                INLINE_TOOL_DEFINITION_BLOCK,
+                "tool_addition",
+            ):
+                bad.append("tools[%d]" % i)
+        return bad
 
     @classmethod
     def _downgrade_inline_tool_definitions(
@@ -248,6 +288,19 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         silently dropped. No content block and no message is ever discarded
         silently.
         """
+        bad_declarations: Final = cls._invalid_tool_declarations(tools)
+        if bad_declarations:
+            raise litellm.BadRequestError(
+                message=(
+                    "DeepSeek /v1/messages cannot forward the entry at %s: tools[] is a declaration "
+                    "container, and a content block (tool_definition/tool_addition) is not a valid "
+                    "declaration there. Refusing rather than sending an illegal block downstream."
+                    % bad_declarations[0]
+                ),
+                model=model,
+                llm_provider="deepseek",
+            )
+
         located: Final = [
             (mi, ci, part)
             for mi, message in enumerate(messages)
