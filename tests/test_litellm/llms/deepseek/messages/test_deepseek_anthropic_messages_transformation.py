@@ -342,12 +342,23 @@ def test_hoisting_copies_every_field_and_drops_only_the_wrapper():
     assert "tool" not in entry
 
 
-def test_hoisting_keeps_the_tool_type_the_declaration_carried():
-    # a server tool's `type` is what makes it that tool; dropping it would silently
-    # turn the declaration into an ordinary client tool
-    request = _transform(_messages(_body(type="web_search_20260209")), tools=[])
+@pytest.mark.parametrize("type_field", [{}, {"type": "custom"}], ids=["untyped", "custom"])
+def test_an_inline_definition_of_a_client_tool_is_hoisted(type_field):
+    # `custom` is Anthropic's discriminator for an ordinary client tool, and no discriminator
+    # means the same thing; both are what this route converts
+    request = _transform(_messages(_body(**type_field)), tools=[])
 
-    assert request["tools"][0]["type"] == "web_search_20260209"
+    assert _converted(request) == {"type": "tool_reference", "name": _TOOL}
+    assert request["tools"][0]["name"] == _TOOL
+    assert "type" not in request["tools"][0]
+
+
+@pytest.mark.parametrize("server_type", ["web_search_20260209", "computer_20250124"])
+def test_an_inline_definition_of_a_server_tool_is_refused(server_type):
+    # RED: the `type` was copied through untouched, so a server tool was hoisted as if the
+    # client had declared a client tool, and the reference written for it named one
+    with pytest.raises(litellm.BadRequestError):
+        _transform(_messages(_body(type=server_type)))
 
 
 # --- what makes two declarations of one name the same tool ---
@@ -447,6 +458,26 @@ def test_a_tool_definition_outside_an_addition_is_refused(block):
     assert "messages[0].content[0]" in str(excinfo.value)
 
 
+def test_a_tool_addition_outside_a_system_message_is_refused():
+    # the provider reads a declaration out of a system message's own content, and this route
+    # has no position to hoist one from anywhere else
+    block = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": _body()}}
+
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": [block]}])
+
+
+@pytest.mark.parametrize("extra", [{}, {"role": "system"}], ids=["plain", "role-on-the-block"])
+def test_a_tool_addition_inside_a_tool_result_is_refused(extra):
+    # RED: the walk descended into every `content` list and treated any node carrying a `role`
+    # as a message, so this declaration was hoisted out of a position the provider never reads
+    block = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": _body()}}
+    result = {"type": "tool_result", "tool_use_id": "toolu_01", "content": [block], **extra}
+
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": [result]}])
+
+
 def test_a_definition_flat_on_the_wrapped_tool_is_refused():
     # the provider was never observed accepting a `tool_definition`'s fields outside a
     # `definition` object, so rather than unwrap several shapes this route declines the
@@ -521,6 +552,22 @@ def test_user_data_that_merely_mentions_a_block_type_is_untouched():
         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1",
                                       "content": [{"type": "text", "text": "unknown variant `tool_definition`"}]}]},
     ]
+
+    assert _transform(messages)["messages"] == messages
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "text", "text": "hi", "content": [_BARE]},
+        {"type": "tool_use", "id": "toolu_01", "name": "x", "input": {}, "content": [_BARE]},
+    ],
+    ids=["text", "tool_use"],
+)
+def test_a_definition_in_an_unread_content_field_is_left_alone(block):
+    # only a tool_result's content is a list of blocks; a `content` field on any other block is
+    # user data, and scanning it would refuse a request the provider accepts
+    messages = [{"role": "user", "content": [block]}]
 
     assert _transform(messages)["messages"] == messages
 
