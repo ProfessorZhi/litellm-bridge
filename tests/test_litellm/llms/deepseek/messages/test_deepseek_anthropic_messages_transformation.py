@@ -254,7 +254,7 @@ def test_inline_valid_definition_accepts_tool_name_spelling():
 
 def test_inline_definition_already_declared_is_referenced_without_duplicate():
     request = _transform(_messages_with(_valid_def()),
-                         tools=[{"name": _TOOL, "description": "pre", "input_schema": {"type": "object", "properties": {}}}])
+                         tools=[{"name": _TOOL, "description": "batch docs", "input_schema": {"type": "object", "properties": {}}}])
     assert request["messages"][2]["content"][1] == {"type": "tool_reference", "tool_name": _TOOL}
     assert sum(1 for t in request["tools"] if t.get("name") == _TOOL) == 1
 
@@ -618,3 +618,72 @@ def test_schemaless_existing_and_schemaless_inline_is_still_referenced():
     )
     assert request["messages"][2]["content"][1] == {"type": "tool_reference", "tool_name": _TOOL}
     assert sum(1 for t in request["tools"] if t.get("name") == _TOOL) == 1
+
+
+# --- declaration identity: what makes two declarations of one name the same tool ---
+
+
+def test_same_name_with_a_different_description_fails_closed():
+    # RED before the contract comparison: the inline description was discarded
+    # without a word and the model saw the tools[] one instead
+    existing = {"name": _TOOL, "description": "stale docs", "input_schema": {"type": "object", "properties": {}}}
+    with pytest.raises(litellm.BadRequestError):
+        _transform(_messages_with(_valid_def()), tools=[existing])
+
+
+def test_declaration_transport_metadata_is_not_a_conflict():
+    # `type` is the custom-tool discriminator this transform strips before sending and
+    # `cache_control` only directs caching, so they may not turn a duplicate into a conflict
+    existing = {
+        "type": "custom",
+        "name": _TOOL,
+        "description": "batch docs",
+        "input_schema": {"type": "object", "properties": {}},
+        "cache_control": {"type": "ephemeral"},
+    }
+    request = _transform(_messages_with(_valid_def()), tools=[existing])
+    assert request["messages"][2]["content"][1] == {"type": "tool_reference", "tool_name": _TOOL}
+    assert sum(1 for t in request["tools"] if t.get("name") == _TOOL) == 1
+
+
+def test_hoisted_declaration_keeps_every_field_except_the_wrapper():
+    # the hoist copies the declaration, it does not rebuild it from a whitelist
+    request = _transform(_messages_with(_nested_def(extra={"title": "Batch", "strict": True})))
+    entry = next(t for t in request["tools"] if t.get("name") == _TOOL)
+    assert entry["title"] == "Batch"
+    assert entry["strict"] is True
+
+
+def test_flat_block_spelling_name_and_tool_name_uses_the_anthropic_one():
+    # RED before the rule was unified: the nested path read `name` while the flat path
+    # read `tool_name`, so one block shape could resolve to two different tools
+    block = {"type": "tool_definition", "tool_name": "flat_spelling", "name": _TOOL,
+             "description": "d", "input_schema": {"type": "object", "properties": {}}}
+    request = _transform(_messages_with(block))
+    assert request["messages"][2]["content"][1] == {"type": "tool_reference", "tool_name": _TOOL}
+    assert [t["name"] for t in request["tools"]] == [_TOOL]
+
+
+def test_definition_carried_flat_on_the_wrapped_tool_is_hoisted():
+    # RED before the symmetry fix: the name came from the wrapped tool while the schema
+    # was looked for only under `definition`, so this block was refused as schemaless
+    part = {"type": "tool_addition", "tool": {"type": "tool_definition", "name": _TOOL,
+            "description": "d", "input_schema": {"type": "object", "properties": {}}}}
+    request = _transform([{"role": "system", "content": [part]}])
+    assert request["messages"][0]["content"][0]["tool"] == {"type": "tool_reference", "name": _TOOL}
+    assert [t["name"] for t in request["tools"]] == [_TOOL]
+
+
+def test_boolean_input_schema_fails_closed():
+    # a declaration needs an object schema to be usable; no evidence the provider takes a boolean one
+    block = {"type": "tool_definition", "definition": {"name": _TOOL, "input_schema": True}}
+    with pytest.raises(litellm.BadRequestError):
+        _transform(_messages_with(block))
+
+
+def test_tool_reference_entry_in_tools_is_forwarded_unchanged():
+    # pinned boundary: only tool_definition / tool_addition entries are refused, because
+    # those are the shapes this transform converts. Any other entry is passed through
+    tools = [{"type": "tool_reference", "tool_name": _TOOL}]
+    request = _transform([{"role": "user", "content": "hi"}], tools=tools)
+    assert request["tools"] == tools
