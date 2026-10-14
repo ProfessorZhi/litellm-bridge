@@ -145,30 +145,6 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             % type(tools).__name__,
         )
 
-    @classmethod
-    def _declared_name(cls, block: Mapping[str, Any], path: str, model: str) -> str:
-        """The one name this block declares.
-
-        `name` is the spelling Anthropic's own blocks use, `tool_name` the flat shape's. Two
-        spellings that disagree are refused rather than picked from.
-        """
-        name: Final = block.get("name")
-        alias: Final = block.get("tool_name")
-        if isinstance(name, str) and name and isinstance(alias, str) and alias and name != alias:
-            _refuse(
-                model,
-                "DeepSeek /v1/messages cannot resolve the tool name at %s: 'name' (%r) and 'tool_name' "
-                "(%r) disagree. Refusing rather than picking one of them." % (path, name, alias),
-            )
-        resolved: Final = name if isinstance(name, str) and name else alias
-        if isinstance(resolved, str) and resolved:
-            return resolved
-        _refuse(
-            model,
-            "DeepSeek /v1/messages cannot convert %s: the block declares no tool name ('name' or "
-            "'tool_name' expected). Refusing to drop it silently." % path,
-        )
-
     @staticmethod
     def _contract(declaration: Mapping[str, Any]) -> dict[str, Any]:
         """The part of a declaration that says which tool it is.
@@ -183,35 +159,38 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return contract
 
     @classmethod
-    def _hoist(
+    def _reference_for(
         cls,
-        block: Mapping[str, Any],
-        wrapped: bool,
+        tool: Mapping[str, Any],
         path: str,
         model: str,
         index: dict[str, Any],
         hoisted: list[Any],
-    ) -> dict[str, Any]:
-        """Declare this block's tool, returning the reference that replaces it.
+    ) -> Mapping[str, Any]:
+        """Hoist this declaration into ``tools[]`` and return the reference that stands for it.
 
-        Fields are copied rather than rebuilt from a whitelist, so a hoist cannot drop one. The
-        reference keeps the spelling it arrived in, `name` or `tool_name`, as `_declared_name`
-        resolves it.
+        Fields are copied rather than rebuilt from a whitelist, so a hoist cannot drop one.
         """
-        definition: Final = block.get("definition")
-        nested: Final = isinstance(definition, Mapping)
-        body: Final[Mapping[str, Any]] = definition if nested else block
-        name: Final = cls._declared_name(body, path, model)
-        declaration: Final = {key: value for key, value in body.items() if key not in ("tool_name", "definition")}
-        if not nested:
-            # the flat shape's `type` is the block discriminator, never a tools[] field
-            declaration.pop("type", None)
-        declaration["name"] = name
+        definition: Final = tool.get("definition")
+        if not isinstance(definition, Mapping):
+            _refuse(
+                model,
+                "DeepSeek /v1/messages cannot convert %s: a tool_definition carries the tool under a "
+                "'definition' object, and this one does not. Refusing rather than guessing at its fields." % path,
+            )
+        name: Final = definition.get("name")
+        if not isinstance(name, str) or not name:
+            _refuse(
+                model,
+                "DeepSeek /v1/messages cannot convert %s: 'definition.name' is not a non-empty string, so "
+                "the reference this declaration becomes could not name anything." % path,
+            )
+        declaration: Final = dict(definition)
         if not isinstance(declaration.get("input_schema"), dict):
             _refuse(
                 model,
-                "DeepSeek /v1/messages cannot convert %s: the block declares no object 'input_schema' to "
-                "put in tools[]. Refusing to drop it silently." % path,
+                "DeepSeek /v1/messages cannot convert %s: 'definition.input_schema' is not an object, and "
+                "DeepSeek takes no boolean or omitted schema. Refusing rather than narrowing the tool." % path,
             )
         existing: Final = index.get(name)
         if existing is None:
@@ -225,9 +204,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 "mid-conversation, but a redefinition has a position and one tools[] entry does not, so "
                 "this transform cannot express both. Refusing rather than picking one." % (name, path),
             )
-        if wrapped:
-            return {"type": TOOL_REFERENCE_BLOCK, "name": name}
-        return {"type": TOOL_REFERENCE_BLOCK, "tool_name": name}
+        return {"type": TOOL_REFERENCE_BLOCK, "name": name}
 
     @classmethod
     def _rewrite_nodes(
@@ -238,15 +215,13 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         model: str,
         index: dict[str, Any],
         hoisted: list[Any],
-        *,
-        may_declare: bool,
     ) -> Any:
-        """Rewrite a copy of this subtree, hoisting every declaration it is allowed to hoist.
+        """Rewrite a copy of this subtree, converting every declaration it carries.
 
-        Only the positions the provider reads as content blocks are walked: a message's
-        `content[]`, a `tool_result`'s nested `content[]`, and a `tool_addition`'s `tool`. A
-        `"type": "tool_definition"` pair anywhere else is legal user data that the provider never
-        parses as a block, so it is left alone rather than refused.
+        Only the positions the provider reads as content blocks are walked, and only
+        ``tool_addition.tool`` can declare a tool. A ``tool_definition`` anywhere else is refused
+        rather than forwarded: the provider rejects the block there, and it rejects the reference it
+        would become there too, so there is no conversion to invent for it.
         """
         if depth > _MAX_PROTOCOL_DEPTH:
             _refuse(
@@ -257,7 +232,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             )
         if isinstance(node, list):
             rewritten: Final = [
-                cls._rewrite_nodes(v, "%s[%d]" % (path, i), depth, model, index, hoisted, may_declare=may_declare)
+                cls._rewrite_nodes(v, "%s[%d]" % (path, i), depth, model, index, hoisted)
                 for i, v in enumerate(node)
             ]
             return node if all(old is new for old, new in zip(node, rewritten)) else rewritten
@@ -265,26 +240,26 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             return node
         kind: Final = node.get("type")
         if kind == INLINE_TOOL_DEFINITION_BLOCK:
-            if not may_declare:
-                _refuse(
-                    model,
-                    "DeepSeek /v1/messages cannot convert %s: this is not a position the provider accepts a "
-                    "tool declaration in. Refusing rather than forwarding an illegal block." % path,
-                )
-            return cls._hoist(node, False, path, model, index, hoisted)
-        if kind == TOOL_ADDITION_BLOCK and isinstance(node.get("tool"), Mapping):
-            tool: Final = node["tool"]
-            if may_declare and tool.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
-                return cls._replace(node, "tool", cls._hoist(tool, True, path + ".tool", model, index, hoisted))
-            inner: Final = cls._rewrite_nodes(
-                tool, path + ".tool", depth + 1, model, index, hoisted, may_declare=False
+            _refuse(
+                model,
+                "DeepSeek /v1/messages cannot convert the tool_definition at %s: the provider reads a "
+                "declaration only under a tool_addition, and refuses a reference at this position as well. "
+                "Refusing rather than forwarding a block that cannot reach the model." % path,
             )
-            return cls._replace(node, "tool", inner)
+        if kind == TOOL_ADDITION_BLOCK:
+            tool: Final = node.get("tool")
+            if isinstance(tool, Mapping) and tool.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
+                return cls._replace(node, "tool", cls._reference_for(tool, path + ".tool", model, index, hoisted))
+            if isinstance(tool, Mapping) and tool.get("type") == TOOL_REFERENCE_BLOCK:
+                return node
+            _refuse(
+                model,
+                "DeepSeek /v1/messages cannot convert the tool_addition at %s: its 'tool' is neither a "
+                "tool_definition nor a tool_reference. Refusing rather than forwarding an illegal block." % path,
+            )
         content: Final = node.get("content")
         if isinstance(content, list):
-            converted: Final = cls._rewrite_nodes(
-                content, path + ".content", depth + 1, model, index, hoisted, may_declare="role" in node
-            )
+            converted: Final = cls._rewrite_nodes(content, path + ".content", depth + 1, model, index, hoisted)
             return cls._replace(node, "content", converted)
         return node
 
@@ -319,9 +294,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             if isinstance(tool, Mapping) and isinstance(tool.get("name"), str) and tool["name"]
         }
         hoisted: Final[list[Any]] = []
-        converted: Final[list[dict]] = cls._rewrite_nodes(
-            messages, "messages", 0, model, index, hoisted, may_declare=False
-        )
+        converted: Final[list[dict]] = cls._rewrite_nodes(messages, "messages", 0, model, index, hoisted)
         if hoisted:
             verbose_logger.debug(
                 "DeepSeek /v1/messages: converted inline tool_definition blocks to tool_reference, "
