@@ -3,7 +3,7 @@ DeepSeek Anthropic-compatible messages transformation config.
 """
 
 from collections.abc import Mapping
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 import litellm
 from litellm.litellm_core_utils.litellm_logging import verbose_logger
@@ -15,6 +15,11 @@ from litellm.types.router import GenericLiteLLMParams
 
 INLINE_TOOL_DEFINITION_BLOCK: Final = "tool_definition"
 TOOL_REFERENCE_BLOCK: Final = "tool_reference"
+
+
+def _refuse(model: str, reason: str) -> NoReturn:
+    """Every refusal from this transform is one and the same client error contract."""
+    raise litellm.BadRequestError(message=reason, model=model, llm_provider="deepseek")
 
 
 class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
@@ -157,6 +162,26 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         b = candidate.get("input_schema")
         return isinstance(a, dict) and isinstance(b, dict) and a != b
 
+    @staticmethod
+    def _has_comparable_schema(existing: Any) -> bool:
+        return isinstance(existing, Mapping) and isinstance(existing.get("input_schema"), dict)
+
+    @staticmethod
+    def _tools_or_raise(tools: Any, model: str) -> None:
+        """Reject a ``tools`` value that is neither absent nor a list of declarations.
+
+        Checked before ``super()`` as well: the parent walks ``tools`` to look for
+        the advisor tool type, so a non-iterable one raises there first.
+        """
+        if tools is None or isinstance(tools, list):
+            return
+        _refuse(
+            model,
+            "DeepSeek /v1/messages expects tools to be a list of declarations, received %s. Refusing "
+            "rather than reinterpreting or forwarding a malformed declaration container."
+            % type(tools).__name__,
+        )
+
     # ---- official mid-conversation system-message form -----------------------
     # {"role":"system","content":[{"type":"tool_addition",
     #    "tool":{"type":"tool_definition","definition":{name,description,input_schema}}}]}
@@ -211,6 +236,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     # parses as a block — so it is neither scanned nor rejected.
     _PROTOCOL_WRAPPER_TYPES: Final = ("tool_result", "tool_addition")
     _MAX_PROTOCOL_DEPTH: Final = 8
+    _DEPTH_LIMIT_MARKER: Final = "!depth-limit!"
 
     @classmethod
     def _scan_protocol_blocks(cls, node: Any, path: str, depth: int, out: list) -> None:
@@ -225,6 +251,8 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         and a ``tool_addition``'s ``tool``. Depth is bounded.
         """
         if depth > cls._MAX_PROTOCOL_DEPTH:
+            # fail closed: "not inspected" must never read as "nothing illegal here"
+            out.append(cls._DEPTH_LIMIT_MARKER + path)
             return
         if isinstance(node, list):
             for i, value in enumerate(node):
@@ -246,11 +274,30 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
 
     @classmethod
     def _find_tool_definitions(cls, messages: Any, path: str = "messages", out=None):
-        """Illegal `tool_definition` blocks remaining in protocol positions."""
+        """Illegal `tool_definition` blocks, and uninspectable nesting, left in protocol positions."""
         if out is None:
             out = []
         cls._scan_protocol_blocks(messages, path, 0, out)
         return out
+
+    @classmethod
+    def _refuse_leftover(cls, leftover: list, model: str) -> None:
+        """Refuse a body that still holds, or could not be fully inspected for, an illegal block."""
+        first: Final = leftover[0]
+        if isinstance(first, str) and first.startswith(cls._DEPTH_LIMIT_MARKER):
+            _refuse(
+                model,
+                "DeepSeek /v1/messages cannot inspect the block nesting at %s: it is deeper than the %d "
+                "levels this transform walks, so an illegal tool_definition may be hiding there. Refusing "
+                "rather than forwarding a block that may be illegal downstream."
+                % (first[len(cls._DEPTH_LIMIT_MARKER):], cls._MAX_PROTOCOL_DEPTH),
+            )
+        _refuse(
+            model,
+            "DeepSeek /v1/messages cannot convert the tool_definition block at %s: this nesting is not a "
+            "shape this transform can hoist losslessly, and forwarding it would send an illegal block "
+            "downstream. Refusing rather than dropping it silently." % first,
+        )
 
     @classmethod
     def _invalid_tool_declarations(cls, tools: Any) -> list:
@@ -288,17 +335,15 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         silently dropped. No content block and no message is ever discarded
         silently.
         """
+        cls._tools_or_raise(tools, model)
         bad_declarations: Final = cls._invalid_tool_declarations(tools)
         if bad_declarations:
-            raise litellm.BadRequestError(
-                message=(
-                    "DeepSeek /v1/messages cannot forward the entry at %s: tools[] is a declaration "
-                    "container, and a content block (tool_definition/tool_addition) is not a valid "
-                    "declaration there. Refusing rather than sending an illegal block downstream."
-                    % bad_declarations[0]
-                ),
-                model=model,
-                llm_provider="deepseek",
+            _refuse(
+                model,
+                "DeepSeek /v1/messages cannot forward the entry at %s: tools[] is a declaration "
+                "container, and a content block (tool_definition/tool_addition) is not a valid "
+                "declaration there. Refusing rather than sending an illegal block downstream."
+                % bad_declarations[0],
             )
 
         located: Final = [
@@ -313,16 +358,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             # hiding deeper (e.g. inside tool_result.content[]); never forward it.
             leftover0: Final = cls._find_tool_definitions(messages, "messages")
             if leftover0:
-                raise litellm.BadRequestError(
-                    message=(
-                        "DeepSeek /v1/messages cannot convert the tool_definition block at %s: this "
-                        "nesting is not a shape this transform can hoist losslessly, and forwarding it "
-                        "would send an illegal block downstream. Refusing rather than dropping it "
-                        "silently." % leftover0[0]
-                    ),
-                    model=model,
-                    llm_provider="deepseek",
-                )
+                cls._refuse_leftover(leftover0, model)
             return messages, tools
 
         declared: Final = {
@@ -333,35 +369,35 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             where: Final = f"messages[{mi}].content[{ci}]"
             tool_name: Final = cls._inline_name_of(block)
             if tool_name is None:
-                raise litellm.BadRequestError(
-                    message=(
-                        f"DeepSeek /v1/messages cannot convert the tool_definition block at {where}: "
-                        "no resolvable tool name ('tool_name' or 'name' expected). Refusing to drop it silently."
-                    ),
-                    model=model,
-                    llm_provider="deepseek",
+                _refuse(
+                    model,
+                    f"DeepSeek /v1/messages cannot convert the tool_definition block at {where}: "
+                    "no resolvable tool name ('tool_name' or 'name' expected). Refusing to drop it silently.",
                 )
             declaration: Final = cls._inline_declaration_of(block, tool_name)
             if tool_name in declared:
-                if declaration is not None and cls._declarations_conflict(declared[tool_name], declaration):
-                    raise litellm.BadRequestError(
-                        message=(
-                            f"DeepSeek /v1/messages found conflicting tool_definition declarations for "
-                            f"'{tool_name}' at {where}. Refusing to guess which schema to use."
-                        ),
-                        model=model,
-                        llm_provider="deepseek",
+                existing: Final = declared[tool_name]
+                if declaration is not None and cls._declarations_conflict(existing, declaration):
+                    _refuse(
+                        model,
+                        f"DeepSeek /v1/messages found conflicting tool_definition declarations for "
+                        f"'{tool_name}' at {where}. Refusing to guess which schema to use.",
+                    )
+                if declaration is not None and not cls._has_comparable_schema(existing):
+                    _refuse(
+                        model,
+                        f"DeepSeek /v1/messages cannot reconcile the tool_definition for '{tool_name}' at "
+                        f"{where}: tools[] already declares that name without a usable input_schema, and "
+                        "the inline definition carries one. Refusing rather than discarding the inline "
+                        "schema silently.",
                     )
                 continue
             if declaration is None:
-                raise litellm.BadRequestError(
-                    message=(
-                        f"DeepSeek /v1/messages cannot convert the tool_definition block for '{tool_name}' at "
-                        f"{where}: it carries no valid 'input_schema' to declare and the tool is not already in "
-                        "tools[]. Refusing to drop it silently."
-                    ),
-                    model=model,
-                    llm_provider="deepseek",
+                _refuse(
+                    model,
+                    f"DeepSeek /v1/messages cannot convert the tool_definition block for '{tool_name}' at "
+                    f"{where}: it carries no valid 'input_schema' to declare and the tool is not already in "
+                    "tools[]. Refusing to drop it silently.",
                 )
             hoisted.append(declaration)
             declared[tool_name] = declaration
@@ -383,15 +419,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
 
         leftover: Final = cls._find_tool_definitions(downgraded, "messages")
         if leftover:
-            raise litellm.BadRequestError(
-                message=(
-                    "DeepSeek /v1/messages cannot convert the tool_definition block at %s: this nesting "
-                    "is not a shape this transform can hoist losslessly, and forwarding it would send an "
-                    "illegal block downstream. Refusing rather than dropping it silently." % leftover[0]
-                ),
-                model=model,
-                llm_provider="deepseek",
-            )
+            cls._refuse_leftover(leftover, model)
         verbose_logger.debug(
             "DeepSeek /v1/messages: downgraded %s inline tool_definition block(s) to tool_reference, "
             "hoisted %s declaration(s) into tools[].",
@@ -408,6 +436,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         litellm_params: GenericLiteLLMParams,
         headers: dict,
     ) -> dict:
+        self._tools_or_raise(anthropic_messages_optional_request_params.get("tools"), model)
         anthropic_messages_request: Final = super().transform_anthropic_messages_request(
             model=model,
             messages=messages,
