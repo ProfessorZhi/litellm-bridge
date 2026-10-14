@@ -3,7 +3,6 @@ DeepSeek Anthropic-compatible messages transformation config.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any, Final, NoReturn
 
 import litellm
@@ -18,44 +17,17 @@ INLINE_TOOL_DEFINITION_BLOCK: Final = "tool_definition"
 TOOL_ADDITION_BLOCK: Final = "tool_addition"
 TOOL_REFERENCE_BLOCK: Final = "tool_reference"
 
-# A `tools[]` entry is a declaration, so a content-block discriminator never belongs in
-# it. These are the two block types this transform converts, and either of them sitting
-# in the declarations array is a block in the wrong place: the 422 this fix exists for.
+# A `tools[]` entry is a declaration, so a content-block discriminator never belongs in it.
 PROTOCOL_BLOCK_TYPES: Final = (INLINE_TOOL_DEFINITION_BLOCK, TOOL_ADDITION_BLOCK)
 
-# Declaration fields that are transport directives rather than part of the tool's
-# contract: `type` is Anthropic's custom-tool discriminator, which this transform strips
-# before sending, and `cache_control` only tells the provider how to cache the prefix.
-# Two declarations of one name that agree on everything else describe the same tool and
-# may be deduplicated; any other difference is a conflict not worth guessing at.
-_DECLARATION_ANNOTATIONS: Final = frozenset(("type", "cache_control"))
+# How deep the block walk descends before it refuses. Bounded so a body nested past this is
+# reported as uninspectable rather than walked until Python's own stack ends.
+_MAX_PROTOCOL_DEPTH: Final = 8
 
 
 def _refuse(model: str, reason: str) -> NoReturn:
     """Every refusal from this transform is one and the same client error contract."""
     raise litellm.BadRequestError(message=reason, model=model, llm_provider="deepseek")
-
-
-@dataclass(frozen=True, slots=True)
-class _InlineDeclaration:
-    """A content block that declares a tool inline, resolved exactly once."""
-
-    # the `tool_addition` wrapper to keep in place for the official form, None when the
-    # definition block sits directly in `content[]`
-    wrapper: Mapping[str, Any] | None
-    name: str | None
-    # the `tools[]` entry to hoist, or None when the block carries no schema to declare
-    declaration: dict[str, Any] | None
-
-    def reference(self, name: str) -> dict[str, Any]:
-        """The block that replaces this position, pointing at the hoisted declaration.
-
-        The name key mirrors the dialect that carried the definition: the official
-        `tool_reference` uses `name`, the flat shape uses `tool_name`.
-        """
-        if self.wrapper is not None:
-            return {**self.wrapper, "tool": {"type": TOOL_REFERENCE_BLOCK, "name": name}}
-        return {"type": TOOL_REFERENCE_BLOCK, "tool_name": name}
 
 
 class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
@@ -154,178 +126,167 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return sanitized_tools
 
     @staticmethod
-    def _tool_name_of(body: Mapping[str, Any]) -> str | None:
-        """The declared tool's name, in either spelling.
-
-        `name` is the field Anthropic's own `tool_definition` and `tool_reference` blocks
-        use, and the one the client's accessor reads, so it wins over the flat shape's
-        `tool_name` when a block carries both.
-        """
-        for key in ("name", "tool_name"):
-            value = body.get(key)
-            if isinstance(value, str) and value:
-                return value
-        return None
-
-    @staticmethod
-    def _tool_declaration(body: Mapping[str, Any], tool_name: str | None) -> dict[str, Any] | None:
-        """The `tools[]` entry this block declares, or None when it cannot declare one.
-
-        The wrapper key `definition` is never carried into `tools[]`, and every other
-        field is copied rather than rebuilt from a whitelist, so a hoist cannot quietly
-        drop one. DeepSeek's Anthropic layer validates `input_schema` as a JSON Schema
-        object: a block without one has nothing to declare, and a reference to it would
-        point at a tool the provider does not have.
-        """
-        if tool_name is None:
-            return None
-        declaration: Final = {
-            key: value for key, value in body.items() if key not in ("type", "tool_name", "definition")
-        }
-        if not isinstance(declaration.get("input_schema"), dict):
-            return None
-        return {**declaration, "name": tool_name}
-
-    @classmethod
-    def _normalize_inline(cls, part: Any) -> _InlineDeclaration | None:
-        """Resolve a content block that declares a tool inline, or None for any other block.
-
-        Both accepted shapes converge here. The official mid-conversation form is a
-        `tool_addition` wrapping a `tool_definition`, whose wrapper stays in place so only
-        its `tool` has to be replaced; a `tool_definition` sitting directly in `content[]`
-        is replaced whole. The declaration fields are read from one place in each, the
-        sub-definition when there is one and the block itself otherwise, which is what
-        keeps the two shapes interchangeable.
-        """
-        if not isinstance(part, Mapping):
-            return None
-        block: Final[Mapping[str, Any]]
-        wrapper: Final[Mapping[str, Any] | None]
-        if part.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
-            wrapper, block = None, part
-        elif part.get("type") == TOOL_ADDITION_BLOCK:
-            tool: Final = part.get("tool")
-            if not (isinstance(tool, Mapping) and tool.get("type") == INLINE_TOOL_DEFINITION_BLOCK):
-                return None
-            wrapper, block = part, tool
-        else:
-            return None
-        definition: Final = block.get("definition")
-        body: Final = definition if isinstance(definition, Mapping) else block
-        tool_name: Final = cls._tool_name_of(body)
-        return _InlineDeclaration(
-            wrapper=wrapper, name=tool_name, declaration=cls._tool_declaration(body, tool_name)
-        )
-
-    @staticmethod
-    def _declaration_contract(declaration: Mapping[str, Any]) -> dict[str, Any]:
-        """The part of a declaration that says which tool it is."""
-        return {
-            key: value for key, value in declaration.items() if key not in _DECLARATION_ANNOTATIONS
-        }
-
-    @classmethod
-    def _declarations_differ(cls, existing: Mapping[str, Any], candidate: Mapping[str, Any]) -> bool:
-        return cls._declaration_contract(existing) != cls._declaration_contract(candidate)
+    def _replace(node: Mapping[str, Any], key: str, value: Any) -> Mapping[str, Any]:
+        """Copy-on-write: a subtree that did not change keeps the identity it arrived with."""
+        return node if node[key] is value else {**node, key: value}
 
     @staticmethod
     def _tools_or_raise(tools: Any, model: str) -> None:
         """Reject a ``tools`` value that is neither absent nor a list of declarations.
 
-        Checked before ``super()`` as well: the parent walks ``tools`` to look for
-        the advisor tool type, so a non-iterable one raises there first.
+        Checked before ``super()`` too: the parent walks ``tools`` for the advisor tool type,
+        so a non-iterable one raises there first.
         """
         if tools is None or isinstance(tools, list):
             return
         _refuse(
             model,
-            "DeepSeek /v1/messages expects tools to be a list of declarations, received %s. Refusing "
-            "rather than reinterpreting or forwarding a malformed declaration container."
+            "DeepSeek /v1/messages expects tools to be a list of declarations, received %s."
             % type(tools).__name__,
         )
 
-    # Only these positions can carry a content block. Anything else that happens
-    # to contain a "type": "tool_definition" pair is user data (e.g. inside
-    # `tool_use.input` or a JSON Schema property), which the provider never
-    # parses as a block — so it is neither scanned nor rejected.
-    _PROTOCOL_WRAPPER_TYPES: Final = ("tool_result", "tool_addition")
-    _MAX_PROTOCOL_DEPTH: Final = 8
-    _DEPTH_LIMIT_MARKER: Final = "!depth-limit!"
-
     @classmethod
-    def _scan_protocol_blocks(cls, node: Any, path: str, depth: int, out: list[str]) -> None:
-        """Walk only protocol block positions, collecting illegal `tool_definition`s.
+    def _declared_name(cls, block: Mapping[str, Any], path: str, model: str) -> str:
+        """The one name this block declares.
 
-        A full recursive walk of the request body would be both slower (it runs on
-        the hot path of every request, inline block or not) and *wrong*: it would
-        reject legal user content that merely contains the string ``tool_definition``
-        — a schema property name, a ``tool_use.input`` value, a tool result payload.
-        So we follow only the three positions where the provider expects a content
-        block: ``messages[].content[]``, a ``tool_result``'s nested ``content[]``,
-        and a ``tool_addition``'s ``tool``. Depth is bounded.
+        `name` is the spelling Anthropic's own blocks use, `tool_name` the flat shape's. Two
+        spellings that disagree are refused rather than picked from.
         """
-        if depth > cls._MAX_PROTOCOL_DEPTH:
-            # fail closed: "not inspected" must never read as "nothing illegal here"
-            out.append(cls._DEPTH_LIMIT_MARKER + path)
-            return
-        if isinstance(node, list):
-            for i, value in enumerate(node):
-                cls._scan_protocol_blocks(value, "%s[%d]" % (path, i), depth, out)
-            return
-        if not isinstance(node, Mapping):
-            return
-        if node.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
-            out.append(path)
-            return
-        # a message envelope: messages[i] -> content[]
-        if "role" in node and isinstance(node.get("content"), list):
-            cls._scan_protocol_blocks(node["content"], path + ".content", depth + 1, out)
-        if node.get("type") in cls._PROTOCOL_WRAPPER_TYPES:
-            if isinstance(node.get("content"), list):
-                cls._scan_protocol_blocks(node["content"], path + ".content", depth + 1, out)
-            if isinstance(node.get("tool"), Mapping):
-                cls._scan_protocol_blocks(node["tool"], path + ".tool", depth + 1, out)
-
-    @classmethod
-    def _find_tool_definitions(cls, messages: Any) -> list[str]:
-        """Illegal `tool_definition` blocks, and uninspectable nesting, left in protocol positions."""
-        out: Final[list[str]] = []
-        cls._scan_protocol_blocks(messages, "messages", 0, out)
-        return out
-
-    @classmethod
-    def _refuse_leftover(cls, leftover: list[str], model: str) -> None:
-        """Refuse a body that still holds, or could not be fully inspected for, an illegal block."""
-        first: Final = leftover[0]
-        if first.startswith(cls._DEPTH_LIMIT_MARKER):
+        name: Final = block.get("name")
+        alias: Final = block.get("tool_name")
+        if isinstance(name, str) and name and isinstance(alias, str) and alias and name != alias:
             _refuse(
                 model,
-                "DeepSeek /v1/messages cannot inspect the block nesting at %s: it is deeper than the %d "
-                "levels this transform walks, so an illegal tool_definition may be hiding there. Refusing "
-                "rather than forwarding a block that may be illegal downstream."
-                % (first[len(cls._DEPTH_LIMIT_MARKER):], cls._MAX_PROTOCOL_DEPTH),
+                "DeepSeek /v1/messages cannot resolve the tool name at %s: 'name' (%r) and 'tool_name' "
+                "(%r) disagree. Refusing rather than picking one of them." % (path, name, alias),
             )
+        resolved: Final = name if isinstance(name, str) and name else alias
+        if isinstance(resolved, str) and resolved:
+            return resolved
         _refuse(
             model,
-            "DeepSeek /v1/messages cannot convert the tool_definition block at %s: this nesting is not a "
-            "shape this transform can hoist losslessly, and forwarding it would send an illegal block "
-            "downstream. Refusing rather than dropping it silently." % first,
+            "DeepSeek /v1/messages cannot convert %s: the block declares no tool name ('name' or "
+            "'tool_name' expected). Refusing to drop it silently." % path,
         )
 
-    @classmethod
-    def _first_invalid_declaration(cls, tools: Any) -> str | None:
-        """The first ``tools[]`` entry that is a protocol block rather than a declaration.
+    @staticmethod
+    def _contract(declaration: Mapping[str, Any]) -> dict[str, Any]:
+        """The part of a declaration that says which tool it is.
 
-        A declaration is identified by its own ``type`` field, and we look at that field
-        only: the entry's ``input_schema`` is never walked, so a property or description
-        that happens to contain the text ``tool_definition`` is legal user data.
+        `cache_control` is a cache hint, not the tool. Anthropic's `custom` discriminator and no
+        discriminator at all both mean an ordinary client tool; a versioned server tool type is
+        what that tool is.
         """
-        if not isinstance(tools, list):
-            return None
-        for i, tool in enumerate(tools):
-            if isinstance(tool, Mapping) and tool.get("type") in PROTOCOL_BLOCK_TYPES:
-                return "tools[%d]" % i
-        return None
+        contract: Final = {key: value for key, value in declaration.items() if key != "cache_control"}
+        if contract.get("type") == "custom":
+            contract.pop("type")
+        return contract
+
+    @classmethod
+    def _hoist(
+        cls,
+        block: Mapping[str, Any],
+        wrapped: bool,
+        path: str,
+        model: str,
+        index: dict[str, Any],
+        hoisted: list[Any],
+    ) -> dict[str, Any]:
+        """Declare this block's tool, returning the reference that replaces it.
+
+        Fields are copied rather than rebuilt from a whitelist, so a hoist cannot drop one. The
+        reference keeps the spelling it arrived in, `name` or `tool_name`, as `_declared_name`
+        resolves it.
+        """
+        definition: Final = block.get("definition")
+        nested: Final = isinstance(definition, Mapping)
+        body: Final[Mapping[str, Any]] = definition if nested else block
+        name: Final = cls._declared_name(body, path, model)
+        declaration: Final = {key: value for key, value in body.items() if key not in ("tool_name", "definition")}
+        if not nested:
+            # the flat shape's `type` is the block discriminator, never a tools[] field
+            declaration.pop("type", None)
+        declaration["name"] = name
+        if not isinstance(declaration.get("input_schema"), dict):
+            _refuse(
+                model,
+                "DeepSeek /v1/messages cannot convert %s: the block declares no object 'input_schema' to "
+                "put in tools[]. Refusing to drop it silently." % path,
+            )
+        existing: Final = index.get(name)
+        if existing is None:
+            hoisted.append(declaration)
+            index[name] = declaration
+        elif cls._contract(existing) != cls._contract(declaration):
+            _refuse(
+                model,
+                "DeepSeek /v1/messages found two declarations of '%s' that do not describe the same tool, "
+                "the block at %s and the one already in tools[]. Anthropic lets a client redefine a tool "
+                "mid-conversation, but a redefinition has a position and one tools[] entry does not, so "
+                "this transform cannot express both. Refusing rather than picking one." % (name, path),
+            )
+        if wrapped:
+            return {"type": TOOL_REFERENCE_BLOCK, "name": name}
+        return {"type": TOOL_REFERENCE_BLOCK, "tool_name": name}
+
+    @classmethod
+    def _rewrite_nodes(
+        cls,
+        node: Any,
+        path: str,
+        depth: int,
+        model: str,
+        index: dict[str, Any],
+        hoisted: list[Any],
+        *,
+        may_declare: bool,
+    ) -> Any:
+        """Rewrite a copy of this subtree, hoisting every declaration it is allowed to hoist.
+
+        Only the positions the provider reads as content blocks are walked: a message's
+        `content[]`, a `tool_result`'s nested `content[]`, and a `tool_addition`'s `tool`. A
+        `"type": "tool_definition"` pair anywhere else is legal user data that the provider never
+        parses as a block, so it is left alone rather than refused.
+        """
+        if depth > _MAX_PROTOCOL_DEPTH:
+            _refuse(
+                model,
+                "DeepSeek /v1/messages cannot inspect %s: it is nested deeper than the %d levels this "
+                "transform walks, so an illegal tool_definition could be hiding there. Refusing rather "
+                "than forwarding a block that may be illegal downstream." % (path, _MAX_PROTOCOL_DEPTH),
+            )
+        if isinstance(node, list):
+            rewritten: Final = [
+                cls._rewrite_nodes(v, "%s[%d]" % (path, i), depth, model, index, hoisted, may_declare=may_declare)
+                for i, v in enumerate(node)
+            ]
+            return node if all(old is new for old, new in zip(node, rewritten)) else rewritten
+        if not isinstance(node, Mapping):
+            return node
+        kind: Final = node.get("type")
+        if kind == INLINE_TOOL_DEFINITION_BLOCK:
+            if not may_declare:
+                _refuse(
+                    model,
+                    "DeepSeek /v1/messages cannot convert %s: this is not a position the provider accepts a "
+                    "tool declaration in. Refusing rather than forwarding an illegal block." % path,
+                )
+            return cls._hoist(node, False, path, model, index, hoisted)
+        if kind == TOOL_ADDITION_BLOCK and isinstance(node.get("tool"), Mapping):
+            tool: Final = node["tool"]
+            if may_declare and tool.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
+                return cls._replace(node, "tool", cls._hoist(tool, True, path + ".tool", model, index, hoisted))
+            inner: Final = cls._rewrite_nodes(
+                tool, path + ".tool", depth + 1, model, index, hoisted, may_declare=False
+            )
+            return cls._replace(node, "tool", inner)
+        content: Final = node.get("content")
+        if isinstance(content, list):
+            converted: Final = cls._rewrite_nodes(
+                content, path + ".content", depth + 1, model, index, hoisted, may_declare="role" in node
+            )
+            return cls._replace(node, "content", converted)
+        return node
 
     @classmethod
     def _downgrade_inline_tool_definitions(
@@ -333,110 +294,41 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     ) -> tuple[list[dict], list[Any]]:
         """Move inline tool definitions into tools[] and reference them by name.
 
-        DeepSeek's Anthropic layer accepts ``tool_reference`` but has no
-        ``tool_definition`` variant, so a client that inlines a deferred tool's
-        definition in messages[] gets a 422 it cannot act on.
-
-        Fail-closed: a block that cannot be *safely* converted (no resolvable name,
-        no object ``input_schema`` to declare, or a declaration of a name that
-        tools[] already declares differently) raises a client ``BadRequestError``
-        instead of being dropped silently. No content block and no message is ever
-        discarded without a word, and nothing the provider would reject is forwarded.
+        DeepSeek accepts ``tool_reference`` but has no ``tool_definition`` variant, so an inlined
+        definition reaches it as a 422 the client cannot act on. A block that cannot be converted
+        safely is refused rather than dropped without a word.
         """
         cls._tools_or_raise(tools, model)
-        bad_declaration: Final = cls._first_invalid_declaration(tools)
-        if bad_declaration is not None:
+        misplaced: Final = next(
+            (
+                i for i, tool in enumerate(tools)
+                if isinstance(tool, Mapping) and tool.get("type") in PROTOCOL_BLOCK_TYPES
+            ),
+            None,
+        )
+        if misplaced is not None:
             _refuse(
                 model,
-                "DeepSeek /v1/messages cannot forward the entry at %s: tools[] is a declaration "
-                "container, and a content block (tool_definition/tool_addition) is not a valid "
-                "declaration there. Refusing rather than sending an illegal block downstream."
-                % bad_declaration,
+                "DeepSeek /v1/messages cannot forward the content block at tools[%d]: tools[] is a "
+                "declaration container. Refusing rather than sending an illegal block downstream." % misplaced,
             )
-
-        # every convertible position is resolved here, once, and the rewrite below reads
-        # those records rather than re-parsing the same block a second time
-        inline: Final[dict[tuple[int, int], _InlineDeclaration]] = {}
-        for mi, message in enumerate(messages):
-            content: Final = message.get("content") if isinstance(message, Mapping) else None
-            if not isinstance(content, list):
-                continue
-            for ci, part in enumerate(content):
-                resolved: Final = cls._normalize_inline(part)
-                if resolved is not None:
-                    inline[(mi, ci)] = resolved
-
-        if not inline:
-            # no convertible top-level shape, but a tool_definition may still be
-            # hiding deeper (e.g. inside tool_result.content[]); never forward it
-            unconverted: Final = cls._find_tool_definitions(messages)
-            if unconverted:
-                cls._refuse_leftover(unconverted, model)
-            return messages, tools
-
-        declared: Final[dict[str, Mapping[str, Any]]] = {
+        # one index over the declarations already in tools[] and every one hoisted from here on
+        index: Final[dict[str, Any]] = {
             tool["name"]: tool
             for tool in tools
-            if isinstance(tool, Mapping) and isinstance(tool.get("name"), str)
+            if isinstance(tool, Mapping) and isinstance(tool.get("name"), str) and tool["name"]
         }
         hoisted: Final[list[Any]] = []
-        references: Final[dict[tuple[int, int], dict[str, Any]]] = {}
-        for (mi, ci), block in inline.items():
-            where: Final = f"messages[{mi}].content[{ci}]"
-            tool_name: Final = block.name
-            if tool_name is None:
-                _refuse(
-                    model,
-                    f"DeepSeek /v1/messages cannot convert the tool_definition block at {where}: "
-                    "no resolvable tool name ('name' or 'tool_name' expected). Refusing to drop it silently.",
-                )
-            references[(mi, ci)] = block.reference(tool_name)
-            existing: Final = declared.get(tool_name)
-            if existing is not None:
-                if block.declaration is not None and cls._declarations_differ(existing, block.declaration):
-                    _refuse(
-                        model,
-                        f"DeepSeek /v1/messages found conflicting declarations for the tool '{tool_name}' "
-                        f"at {where}: tools[] already declares that name, and the two do not describe the "
-                        "same tool. Refusing to guess which declaration the model should see.",
-                    )
-                continue
-            if block.declaration is None:
-                _refuse(
-                    model,
-                    f"DeepSeek /v1/messages cannot convert the tool_definition block for '{tool_name}' at "
-                    f"{where}: it carries no valid 'input_schema' to declare and the tool is not already in "
-                    "tools[]. Refusing to drop it silently.",
-                )
-            hoisted.append(block.declaration)
-            declared[tool_name] = block.declaration
-
-        downgraded: Final[list[dict]] = []
-        for mi, message in enumerate(messages):
-            content: Final = message.get("content") if isinstance(message, Mapping) else None
-            if not isinstance(content, list):
-                downgraded.append(message)
-                continue
-            downgraded.append(
-                {
-                    **message,
-                    "content": [
-                        references[(mi, ci)] if (mi, ci) in references else part
-                        for ci, part in enumerate(content)
-                    ],
-                }
-            )
-
-        leftover: Final = cls._find_tool_definitions(downgraded)
-        if leftover:
-            cls._refuse_leftover(leftover, model)
-        verbose_logger.debug(
-            "DeepSeek /v1/messages: downgraded %s inline tool_definition block(s) to tool_reference, "
-            "hoisted %s declaration(s) into tools[].",
-            len(inline),
-            len(hoisted),
+        converted: Final[list[dict]] = cls._rewrite_nodes(
+            messages, "messages", 0, model, index, hoisted, may_declare=False
         )
-        return downgraded, [*tools, *hoisted]
+        if hoisted:
+            verbose_logger.debug(
+                "DeepSeek /v1/messages: converted inline tool_definition blocks to tool_reference, "
+                "hoisting %d declaration(s) into tools[].",
+                len(hoisted),
+            )
+        return converted, [*tools, *hoisted]
 
     def transform_anthropic_messages_request(
         self,
