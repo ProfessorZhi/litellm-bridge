@@ -16,6 +16,7 @@ from litellm.types.router import GenericLiteLLMParams
 INLINE_TOOL_DEFINITION_BLOCK: Final = "tool_definition"
 TOOL_ADDITION_BLOCK: Final = "tool_addition"
 TOOL_REFERENCE_BLOCK: Final = "tool_reference"
+TOOL_RESULT_BLOCK: Final = "tool_result"
 
 # A `tools[]` entry is a declaration, so a content-block discriminator never belongs in it.
 PROTOCOL_BLOCK_TYPES: Final = (INLINE_TOOL_DEFINITION_BLOCK, TOOL_ADDITION_BLOCK)
@@ -178,6 +179,14 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 "DeepSeek /v1/messages cannot convert %s: a tool_definition carries the tool under a "
                 "'definition' object, and this one does not. Refusing rather than guessing at its fields." % path,
             )
+        declared_type: Final = definition.get("type")
+        if declared_type is not None and declared_type != "custom":
+            _refuse(
+                model,
+                "DeepSeek /v1/messages cannot convert %s: this transform converts client tools, and the "
+                "inline definition carries type '%s'. A server tool belongs in tools[] under its own type. "
+                "Refusing rather than hoisting it as an ordinary client tool." % (path, declared_type),
+            )
         name: Final = definition.get("name")
         if not isinstance(name, str) or not name:
             _refuse(
@@ -190,7 +199,8 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             _refuse(
                 model,
                 "DeepSeek /v1/messages cannot convert %s: 'definition.input_schema' is not an object, and "
-                "DeepSeek takes no boolean or omitted schema. Refusing rather than narrowing the tool." % path,
+                "this compatibility transform requires an object input_schema. Refusing rather than "
+                "narrowing the tool." % path,
             )
         existing: Final = index.get(name)
         if existing is None:
@@ -209,30 +219,32 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     @classmethod
     def _rewrite_nodes(
         cls,
-        node: Any,
+        node: object,
         path: str,
         depth: int,
         model: str,
         index: dict[str, Any],
         hoisted: list[Any],
-    ) -> Any:
-        """Rewrite a copy of this subtree, converting every declaration it carries.
+        *,
+        declares: bool,
+    ) -> object:
+        """Rewrite a copy of this subtree, converting the declaration it is allowed to carry.
 
-        Only the positions the provider reads as content blocks are walked, and only
-        ``tool_addition.tool`` can declare a tool. A ``tool_definition`` anywhere else is refused
-        rather than forwarded: the provider rejects the block there, and it rejects the reference it
-        would become there too, so there is no conversion to invent for it.
+        Two positions are walked: a root message's own ``content`` list, where ``declares`` says
+        whether the provider reads a ``tool_addition``, and a ``tool_result``'s ``content``. A
+        ``content`` field on any other block, and a ``role`` field below the message it belongs to,
+        is user data and is left exactly as it arrived.
         """
-        if depth > _MAX_PROTOCOL_DEPTH:
-            _refuse(
-                model,
-                "DeepSeek /v1/messages cannot inspect %s: it is nested deeper than the %d levels this "
-                "transform walks, so an illegal tool_definition could be hiding there. Refusing rather "
-                "than forwarding a block that may be illegal downstream." % (path, _MAX_PROTOCOL_DEPTH),
-            )
         if isinstance(node, list):
+            if depth > _MAX_PROTOCOL_DEPTH:
+                _refuse(
+                    model,
+                    "DeepSeek /v1/messages cannot inspect %s: it is nested deeper than the %d levels this "
+                    "transform walks, so an illegal tool_definition could be hiding there. Refusing rather "
+                    "than forwarding a block that may be illegal downstream." % (path, _MAX_PROTOCOL_DEPTH),
+                )
             rewritten: Final = [
-                cls._rewrite_nodes(v, "%s[%d]" % (path, i), depth, model, index, hoisted)
+                cls._rewrite_nodes(v, "%s[%d]" % (path, i), depth, model, index, hoisted, declares=declares)
                 for i, v in enumerate(node)
             ]
             return node if all(old is new for old, new in zip(node, rewritten)) else rewritten
@@ -247,6 +259,12 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 "Refusing rather than forwarding a block that cannot reach the model." % path,
             )
         if kind == TOOL_ADDITION_BLOCK:
+            if not declares:
+                _refuse(
+                    model,
+                    "DeepSeek /v1/messages cannot convert the tool_addition at %s: only a root system "
+                    "message's own content declares a tool. Refusing rather than forwarding it." % path,
+                )
             tool: Final = node.get("tool")
             if isinstance(tool, Mapping) and tool.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
                 return cls._replace(node, "tool", cls._reference_for(tool, path + ".tool", model, index, hoisted))
@@ -257,16 +275,20 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 "DeepSeek /v1/messages cannot convert the tool_addition at %s: its 'tool' is neither a "
                 "tool_definition nor a tool_reference. Refusing rather than forwarding an illegal block." % path,
             )
-        content: Final = node.get("content")
-        if isinstance(content, list):
-            converted: Final = cls._rewrite_nodes(content, path + ".content", depth + 1, model, index, hoisted)
-            return cls._replace(node, "content", converted)
+        if kind == TOOL_RESULT_BLOCK:
+            content: Final = node.get("content")
+            if isinstance(content, list):
+                return cls._replace(
+                    node,
+                    "content",
+                    cls._rewrite_nodes(content, path + ".content", depth + 1, model, index, hoisted, declares=False),
+                )
         return node
 
     @classmethod
     def _downgrade_inline_tool_definitions(
         cls, messages: list[dict], tools: list[Any], model: str = "deepseek"
-    ) -> tuple[list[dict], list[Any]]:
+    ) -> tuple[list[Mapping[str, Any]], list[Any]]:
         """Move inline tool definitions into tools[] and reference them by name.
 
         DeepSeek accepts ``tool_reference`` but has no ``tool_definition`` variant, so an inlined
@@ -294,7 +316,24 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             if isinstance(tool, Mapping) and isinstance(tool.get("name"), str) and tool["name"]
         }
         hoisted: Final[list[Any]] = []
-        converted: Final[list[dict]] = cls._rewrite_nodes(messages, "messages", 0, model, index, hoisted)
+        converted: Final[list[Mapping[str, Any]]] = [
+            cls._replace(
+                message,
+                "content",
+                cls._rewrite_nodes(
+                    message["content"],
+                    "messages[%d].content" % i,
+                    0,
+                    model,
+                    index,
+                    hoisted,
+                    declares=message.get("role") == "system",
+                ),
+            )
+            if isinstance(message, Mapping) and isinstance(message.get("content"), list)
+            else message
+            for i, message in enumerate(messages)
+        ]
         if hoisted:
             verbose_logger.debug(
                 "DeepSeek /v1/messages: converted inline tool_definition blocks to tool_reference, "

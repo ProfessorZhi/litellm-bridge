@@ -26,16 +26,25 @@ byte-identical to baseline.
 A `tool_definition` in any other position is refused with a client 400 naming it. DeepSeek answers
 a bare `tool_definition` at `messages[].content[]` with `unknown variant 'tool_definition'`, and
 the `tool_reference` it would turn into there with `unknown variant 'tool_reference'`, so
-converting only moves the same failure one step later. The remaining refusals: no `definition`
-object, no non-empty `definition.name`, no object `input_schema`, a `tool_addition` whose `tool` is
-neither a definition nor a reference, a redeclaration `tools[]` already holds as a different tool,
-a content block sitting in `tools[]`, a non-list `tools`, and nesting past the bounded walk depth.
+converting only moves the same failure one step later. Only a root system message's own `content`
+declares a tool; a `tool_addition` anywhere else, including inside a `tool_result`, is refused
+too. The remaining refusals: no `definition` object, a `definition.type` naming a server tool
+rather than a client one, no non-empty `definition.name`, no object `input_schema`, a
+`tool_addition` whose `tool` is neither a definition nor a reference, a redeclaration `tools[]`
+already holds as a different tool, a content block sitting in `tools[]`, a non-list `tools`, and
+nesting past the bounded walk depth.
 
 ## Limitations
 
 * Only the nested form converts. A declaration written flat on `tool_addition.tool`
   (`{type: "tool_definition", name, input_schema}`) is refused: the provider has not been observed
   accepting those fields outside a `definition` object.
+* The walk reads two positions: a root message's `content` list and a `tool_result`'s `content`. A
+  `content` field on any other block is user data and is forwarded untouched, so a client that
+  inlines a definition there is not caught by this transform and meets the provider's own 422.
+* Only client tools convert. A `definition.type` that is absent or `custom` is an ordinary client
+  tool; a versioned server tool type is refused rather than hoisted as if it were one. Server tools
+  listed natively in `tools[]` are untouched by this.
 * Dynamic redefinition is not supported. Anthropic lets a client redefine a tool mid-conversation
   and the newer definition applies from that position onward; a `tools[]` entry has no position, so
   the two cannot both be expressed and a conflicting redeclaration is refused. That is a limit of
