@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-label="Recorded live DeepSeek A/B test: baseline HTTP 422 and patched HTTP 200">
+<rect width="1280" height="720" rx="18" fill="#0d1117"/>
+<rect x="26" y="24" width="1228" height="674" rx="14" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+<rect x="26" y="24" width="1228" height="58" rx="14" fill="#21262d"/>
+<rect x="26" y="64" width="1228" height="18" fill="#21262d"/>
+<circle cx="56" cy="53" r="7" fill="#f85149"/><circle cx="80" cy="53" r="7" fill="#d29922"/><circle cx="104" cy="53" r="7" fill="#3fb950"/>
+<text x="140" y="59" font-family="ui-monospace,Consolas,Menlo,monospace" font-size="17" fill="#c9d1d9">LIT-0220 / RUN-0019 / LIVE DeepSeek A/B</text>
+<text x="55" y="125" font-family="Arial,'Noto Sans',sans-serif" font-size="28" font-weight="bold" fill="#f0f6fc">同一官方协议请求 · 真实 DeepSeek Flash</text>
+<text x="55" y="157" font-family="ui-monospace,Consolas,monospace" font-size="16" fill="#8b949e">Fixture: 01_official_inline_definition.json  |  POST /v1/messages</text>
+<rect x="54" y="184" width="564" height="277" rx="10" fill="#1e242d" stroke="#f85149" stroke-width="2"/>
+<rect x="662" y="184" width="564" height="277" rx="10" fill="#1e242d" stroke="#3fb950" stroke-width="2"/>
+<text x="83" y="226" font-family="Arial,'Noto Sans',sans-serif" font-size="23" font-weight="bold" fill="#f0f6fc">A · Baseline（原版）</text>
+<text x="690" y="226" font-family="Arial,'Noto Sans',sans-serif" font-size="23" font-weight="bold" fill="#f0f6fc">B · Patched（修复版）</text>
+<text x="83" y="307" font-family="ui-monospace,Consolas,monospace" font-size="59" font-weight="bold" fill="#ff7b72">HTTP 422</text>
+<text x="690" y="307" font-family="ui-monospace,Consolas,monospace" font-size="59" font-weight="bold" fill="#56d364">HTTP 200</text>
+<text x="83" y="350" font-family="ui-monospace,Consolas,monospace" font-size="18" fill="#c9d1d9">elapsed: 0.27 s  |  response: 741 B</text>
+<text x="690" y="350" font-family="ui-monospace,Consolas,monospace" font-size="18" fill="#c9d1d9">elapsed: 1.42 s  |  response: 697 B</text>
+<text x="83" y="387" font-family="ui-monospace,Consolas,monospace" font-size="16" fill="#f0b0af">unknown variant: tool_definition</text>
+<text x="83" y="418" font-family="ui-monospace,Consolas,monospace" font-size="16" fill="#c9d1d9">expected: tool_reference  |  column: yes</text>
+<text x="690" y="387" font-family="ui-monospace,Consolas,monospace" font-size="16" fill="#a6e3a1">blocks: [thinking, text]</text>
+<text x="690" y="418" font-family="ui-monospace,Consolas,monospace" font-size="16" fill="#c9d1d9">tokens: in 225 / out 64 / cached 128</text>
+<rect x="54" y="488" width="1172" height="116" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+<text x="80" y="523" font-family="Arial,'Noto Sans',sans-serif" font-size="20" font-weight="bold" fill="#f0f6fc">真实工具调用回合 · RUN-0017</text>
+<text x="80" y="562" font-family="ui-monospace,Consolas,monospace" font-size="17" fill="#56d364">B: tool_use 200  →  tool_result (same real ID) 200  →  end_turn</text>
+<text x="55" y="643" font-family="ui-monospace,Consolas,monospace" font-size="15" fill="#9da7b2">SOURCE: verified live-matrix.jsonl + tool_roundtrip.jsonl  |  sanitized evidence visualization</text>
+<text x="55" y="672" font-family="ui-monospace,Consolas,monospace" font-size="14" fill="#8b949e">Real provider via dev relay (double-proxy). Not a terminal screenshot. Client-origin inline still unobserved.</text>
+</svg>
