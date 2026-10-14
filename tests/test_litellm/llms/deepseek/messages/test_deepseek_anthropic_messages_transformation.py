@@ -549,3 +549,72 @@ def test_deep_wrapping_still_fails_closed():
             "type": "tool_definition", "definition": {"name": "x", "input_schema": {}}}}}}]}
     with pytest.raises(litellm.BadRequestError):
         _transform([blk])
+
+
+_MAX_WRAPPERS = 7  # the innermost block still lands at depth <= _MAX_PROTOCOL_DEPTH
+
+
+def _wrap_tool_result(inner, layers):
+    node = inner
+    for _ in range(layers):
+        node = {"type": "tool_result", "tool_use_id": "toolu_wrap", "content": [node]}
+    return node
+
+
+def _wrap_tool_addition(inner, layers):
+    node = inner
+    for _ in range(layers):
+        node = {"type": "tool_addition", "tool": node}
+    return node
+
+
+def _unconvertible_definition():
+    return {"type": "tool_definition", "definition": {"name": "deep_tool", "input_schema": {"type": "object"}}}
+
+
+@pytest.mark.parametrize("layers", [_MAX_WRAPPERS, _MAX_WRAPPERS + 1, _MAX_WRAPPERS + 5])
+@pytest.mark.parametrize("wrapper", [_wrap_tool_result, _wrap_tool_addition], ids=["tool_result", "tool_addition"])
+def test_definition_wrapped_past_supported_depth_fails_closed(wrapper, layers):
+    # RED before the depth guard: past the limit the walk gave up silently, the block was
+    # treated as absent, and the illegal definition was forwarded to DeepSeek untouched.
+    block = wrapper(_unconvertible_definition(), layers)
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": [block]}])
+
+
+@pytest.mark.parametrize("wrapper", [_wrap_tool_result, _wrap_tool_addition], ids=["tool_result", "tool_addition"])
+def test_depth_refusal_reports_a_path_and_no_payload(wrapper):
+    block = wrapper(_unconvertible_definition(), _MAX_WRAPPERS + 1)
+    with pytest.raises(litellm.BadRequestError) as excinfo:
+        _transform([{"role": "user", "content": [block]}])
+    assert "messages[0].content[0]" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("tools", [{"name": "x"}, "not-a-list", 42], ids=["dict", "str", "int"])
+def test_non_list_tools_fail_closed_instead_of_being_iterated(tools):
+    # RED before the guard: a dict yielded its keys, a str its characters, an int a TypeError
+    with pytest.raises(litellm.BadRequestError):
+        _transform(_messages_with(_valid_def()), tools=tools)
+
+
+def test_non_list_tools_fail_closed_even_without_inline_definitions():
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": "hi"}], tools={"name": "x"})
+
+
+@pytest.mark.parametrize("existing", [{"name": _TOOL, "description": "pre"}, {"name": _TOOL, "input_schema": "oops"}],
+                         ids=["no_schema_key", "non_dict_schema"])
+def test_existing_declaration_without_usable_schema_does_not_swallow_inline_schema(existing):
+    # RED before the guard: the inline schema was discarded without a word
+    with pytest.raises(litellm.BadRequestError):
+        _transform(_messages_with(_valid_def()), tools=[existing])
+
+
+def test_schemaless_existing_and_schemaless_inline_is_still_referenced():
+    # nothing is dropped when neither side carries a schema, so referencing stays legal
+    request = _transform(
+        _messages_with({"type": "tool_definition", "definition": {"name": _TOOL}}),
+        tools=[{"name": _TOOL, "description": "pre"}],
+    )
+    assert request["messages"][2]["content"][1] == {"type": "tool_reference", "tool_name": _TOOL}
+    assert sum(1 for t in request["tools"] if t.get("name") == _TOOL) == 1
