@@ -236,6 +236,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         index: dict[str, Any],
         hoisted: dict[str, Any],  # mutable-ok: declarations are collected in message order before tools[] is built
         removed: set[str],  # mutable-ok: withdrawals are applied in message order before tools[] is built
+        withdrawn: Set[str],
         *,
         declares: bool,
     ) -> object:
@@ -255,7 +256,9 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                     "than forwarding a block that may be illegal downstream." % (path, _MAX_PROTOCOL_DEPTH),
                 )
             rewritten: Final = [
-                cls._rewrite_nodes(v, "%s[%d]" % (path, i), depth, model, index, hoisted, removed, declares=declares)
+                cls._rewrite_nodes(
+                    v, "%s[%d]" % (path, i), depth, model, index, hoisted, removed, withdrawn, declares=declares
+                )
                 for i, v in enumerate(node)
             ]
             if not any(value is _DROP for value in rewritten):
@@ -311,10 +314,14 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 )
             tool: Final = node.get("tool")
             if isinstance(tool, Mapping) and tool.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
-                return cls._replace(
-                    node, "tool", cls._reference_for(tool, path + ".tool", model, index, hoisted, removed)
-                )
+                reference: Final = cls._reference_for(tool, path + ".tool", model, index, hoisted, removed)
+                if reference.get("name") in withdrawn:
+                    return _DROP
+                return cls._replace(node, "tool", reference)
             if isinstance(tool, Mapping) and tool.get("type") == TOOL_REFERENCE_BLOCK:
+                reference_name: Final = tool.get("name")
+                if isinstance(reference_name, str) and reference_name in withdrawn:
+                    return _DROP
                 return cls._re_added(node, tool, removed)
             _refuse(
                 model,
@@ -328,7 +335,15 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                     node,
                     "content",
                     cls._rewrite_nodes(
-                        content, path + ".content", depth + 1, model, index, hoisted, removed, declares=False
+                        content,
+                        path + ".content",
+                        depth + 1,
+                        model,
+                        index,
+                        hoisted,
+                        removed,
+                        withdrawn,
+                        declares=False,
                     ),
                 )
         return node
@@ -368,6 +383,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         index: dict[str, Any],  # mutable-ok: the walk accumulates declarations into this shared index
         hoisted: dict[str, Any],  # mutable-ok: declarations are collected in message order before tools[] is built
         removed: set[str],  # mutable-ok: withdrawals are applied in message order before tools[] is built
+        withdrawn: Set[str],
     ) -> Mapping[str, Any] | None:
         content: Final = message.get("content")
         if not isinstance(content, list):
@@ -380,6 +396,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             index,
             hoisted,
             removed,
+            withdrawn,
             declares=message.get("role") == "system",
         )
         if content and isinstance(rewritten, list) and not rewritten:
@@ -426,7 +443,22 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 "DeepSeek /v1/messages cannot forward the content block at tools[%d]: tools[] is a "
                 "declaration container. Refusing rather than sending an illegal block downstream." % misplaced,
             )
-        # one index over the declarations already in tools[] and every one hoisted from here on
+        # First pass: the final set of names still withdrawn. Additions for these names cannot
+        # stay as references, because the provider resolves every reference against the final
+        # tools[], where the name is deliberately absent.
+        analysis_index: Final[dict[str, Any]] = {  # mutable-ok: analysis ledger for one walk
+            tool["name"]: tool
+            for tool in tools
+            if isinstance(tool, Mapping) and isinstance(tool.get("name"), str) and tool["name"]
+        }  # mutable-ok: the wire tools[] is a JSON array
+        analysis_hoisted: Final[dict[str, Any]] = {}  # mutable-ok: analysis ledger for one walk
+        analysis_removed: Final[set[str]] = set()  # mutable-ok: analysis ledger for one walk
+        for i, message in enumerate(messages):
+            cls._rewrite_message(message, i, model, analysis_index, analysis_hoisted, analysis_removed, frozenset())
+        withdrawn: Final = frozenset(analysis_removed)
+
+        # Second pass: rewrite for the provider, dropping the historical additions of names that
+        # are still withdrawn at the end while keeping the ledger that validates every removal.
         index: Final[dict[str, Any]] = {
             tool["name"]: tool
             for tool in tools
@@ -437,7 +469,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         converted: Final[list[Mapping[str, Any]]] = [
             rewritten
             for i, message in enumerate(messages)
-            if (rewritten := cls._rewrite_message(message, i, model, index, hoisted, removed)) is not None
+            if (rewritten := cls._rewrite_message(message, i, model, index, hoisted, removed, withdrawn)) is not None
         ]
         if messages and not converted:
             _refuse(

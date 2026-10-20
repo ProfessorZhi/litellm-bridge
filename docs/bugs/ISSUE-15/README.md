@@ -23,6 +23,13 @@ replaces the declaration after a withdrawal. The final `tools[]` is the set avai
 the conversation, which is what the provider reads for the next turn. Text, thinking, `tool_use`
 and `tool_result` history are left untouched.
 
+A tool that an earlier `tool_addition` declared and a later `tool_removal` still withdraws cannot
+remain as a reference: DeepSeek resolves every `tool_addition.tool_reference` against the final
+`tools[]`, where the name is deliberately absent. The transform therefore drops those historical
+addition blocks, drops the system message if it becomes empty, and keeps the declaration in the
+internal ledger only so the later removal still validates. Other content in the same message is
+kept. This is the two-phase shape exercised by the full-length E2E.
+
 What cannot be expressed safely is refused with a client 400 naming the position: a removal outside
 a root system message's own content, a removal whose `tool` is not a `tool_reference` (including
 `tool_definition`, `mcp_tool_reference` and `mcp_toolset_reference`), a removal without a name, a
@@ -32,7 +39,7 @@ that contained only removals is dropped; if that would leave no message, the req
 
 ## Validation
 
-- `pytest tests/test_litellm/llms/deepseek/` -> 113 passed
+- `pytest tests/test_litellm/llms/deepseek/` -> 119 passed
 - `ruff check` and `ruff format --check` on the two changed files -> clean
 - type-discipline count for the transformation file -> 46, one below the branch point
 - Anthropic Messages pass-through suite -> 249 passed, 16 failed on both the candidate and the
@@ -41,12 +48,20 @@ that contained only removals is dropped; if that would leave no message, the req
   frozen production image and 200 on the fixed image; ordinary text is 200 on both; the old
   `tool_definition` path still answers 200; a removal followed by a redefinition answers 200 and
   the model uses the revision-two definition; a streaming removal ends with `message_stop`
+- Full-length structure-equivalent A/B, 1,982,814 bytes, 1017 messages, 147 tools, stream=true:
+  A answers 422 at `messages[1016]`; B answers 200 with SSE `message_stop` and no error event,
+  usage 909,641 input / 16 output
 
 ## Limits
 
 - DeepSeek has no positional tool changes. The transform therefore sends one final `tools[]` for
   the whole conversation, not a per-message tool set. This is correct for the next generation and
   for history, but a removal changes the prefix and can cost a prompt cache hit
+- A tool that is still withdrawn at the end has its historical `tool_addition` blocks dropped, so
+  the history no longer shows the tool as declared even though the final tool set is correct. The
+  full-length E2E accepted this shape
+- The original event's `stream` and `max_tokens` values were not available. The full-length E2E
+  uses `stream=true` and `max_tokens=16`; the non-stream short test remains separate
 - `tool_removal` only accepts a `tool_reference` here. MCP reference kinds are refused rather than
   resolved
 - The walk covers `messages[].content` and a `tool_result`'s `content`, the same positions as the

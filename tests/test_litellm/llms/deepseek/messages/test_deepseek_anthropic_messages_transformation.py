@@ -824,3 +824,104 @@ def test_a_withdrawal_in_user_data_is_left_alone():
     ]
 
     assert _transform(messages)["messages"] == messages
+
+
+# --- an addition that is withdrawn later must not survive as a reference ---
+
+_TOOL_USE = {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_01", "name": _TOOL, "input": {}}]}
+_TOOL_RESULT = {
+    "role": "user",
+    "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "ok"}],
+}
+
+
+def test_a_finally_withdrawn_addition_is_not_left_as_a_reference():
+    messages = [{"role": "user", "content": "use it"}, _addition(_body()), _TOOL_USE, _TOOL_RESULT, _withdrawal()]
+
+    request = _transform(messages, tools=[])
+
+    assert request["tools"] == []
+    assert request["messages"][1] == _TOOL_USE
+    assert request["messages"][2] == _TOOL_RESULT
+    assert request["messages"][-1]["content"] == [{"type": "text", "text": "update"}]
+    assert "tool_addition" not in _outbound_block_types(request)
+    assert "tool_removal" not in _outbound_block_types(request)
+
+
+def test_a_finally_withdrawn_addition_by_reference_is_dropped():
+    addition = {"type": "tool_addition", "tool": {"type": "tool_reference", "name": _TOOL}}
+    messages = [
+        {"role": "user", "content": "use it"},
+        {"role": "system", "content": [addition]},
+        _TOOL_USE,
+        _TOOL_RESULT,
+        _withdrawal(),
+    ]
+
+    request = _transform(messages, tools=[_body()])
+
+    assert request["tools"] == []
+    assert request["messages"][1] == _TOOL_USE
+    assert request["messages"][2] == _TOOL_RESULT
+    assert "tool_addition" not in _outbound_block_types(request)
+
+
+def test_a_withdrawn_addition_with_text_keeps_the_text():
+    addition = _addition(_body())["content"][0]
+    messages = [
+        {"role": "user", "content": "use it"},
+        {"role": "system", "content": [{"type": "text", "text": "keep"}, addition]},
+        _withdrawal(),
+    ]
+
+    request = _transform(messages, tools=[])
+
+    assert request["messages"][1]["content"] == [{"type": "text", "text": "keep"}]
+    assert request["tools"] == []
+    assert "tool_addition" not in _outbound_block_types(request)
+
+
+def test_a_readded_addition_after_a_withdrawal_is_kept():
+    reoffer = {"type": "tool_addition", "tool": {"type": "tool_reference", "name": _TOOL}}
+    messages = [
+        {"role": "user", "content": "use it"},
+        _addition(_body()),
+        _TOOL_USE,
+        _TOOL_RESULT,
+        {"role": "system", "content": [_removal(), reoffer]},
+    ]
+
+    request = _transform(messages, tools=[])
+
+    assert [tool.get("name") for tool in request["tools"]] == [_TOOL]
+    assert request["messages"][1]["content"][0]["tool"] == {"type": "tool_reference", "name": _TOOL}
+    assert "tool_addition" in _outbound_block_types(request)
+    assert "tool_removal" not in _outbound_block_types(request)
+
+
+def test_a_finally_withdrawn_addition_can_be_redefined_by_value():
+    replacement = _body(description="revision two")
+    redefine = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": replacement}}
+    messages = [
+        {"role": "user", "content": "use it"},
+        _addition(_body()),
+        _TOOL_USE,
+        _TOOL_RESULT,
+        {"role": "system", "content": [_removal(), redefine]},
+    ]
+
+    request = _transform(messages, tools=[])
+
+    assert request["tools"] == [replacement]
+    assert request["messages"][1]["content"][0]["tool"] == {"type": "tool_reference", "name": _TOOL}
+    assert "tool_addition" in _outbound_block_types(request)
+
+
+def test_streaming_and_non_streaming_dynamic_addition_agree():
+    messages = [{"role": "user", "content": "use it"}, _addition(_body()), _TOOL_USE, _TOOL_RESULT, _withdrawal()]
+
+    non_stream = _transform(messages, tools=[], stream=False)
+    stream = _transform(messages, tools=[], stream=True)
+
+    assert non_stream["messages"] == stream["messages"]
+    assert non_stream["tools"] == stream["tools"]
