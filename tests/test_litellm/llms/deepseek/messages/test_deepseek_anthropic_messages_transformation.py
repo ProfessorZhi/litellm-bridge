@@ -925,3 +925,50 @@ def test_streaming_and_non_streaming_dynamic_addition_agree():
 
     assert non_stream["messages"] == stream["messages"]
     assert non_stream["tools"] == stream["tools"]
+
+
+def test_a_withdrawal_after_a_readd_after_a_withdrawal_drops_every_addition():
+    reoffer = {"type": "tool_addition", "tool": {"type": "tool_reference", "name": _TOOL}}
+    messages = [
+        {"role": "user", "content": "use it"},
+        _addition(_body()),
+        _TOOL_USE,
+        _TOOL_RESULT,
+        {"role": "system", "content": [{"type": "text", "text": "first"}, _removal(), reoffer]},
+        _withdrawal(),
+    ]
+
+    request = _transform(messages, tools=[])
+
+    assert request["tools"] == []
+    assert request["messages"][1] == _TOOL_USE
+    assert request["messages"][3]["content"] == [{"type": "text", "text": "first"}]
+    assert "tool_addition" not in _outbound_block_types(request)
+
+
+def test_a_finally_withdrawn_addition_is_still_validated_before_it_is_dropped():
+    bad = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": _body(input_schema="x")}}
+    messages = [{"role": "user", "content": "use it"}, {"role": "system", "content": [bad]}, _withdrawal()]
+
+    with pytest.raises(litellm.BadRequestError) as excinfo:
+        _transform(messages, tools=[])
+
+    assert "input_schema" in str(excinfo.value)
+
+
+def test_a_withdrawal_does_not_rewrite_other_tools_sharing_a_name():
+    first = _body(name=_OTHER_TOOL, description="first")
+    second = _body(name=_OTHER_TOOL, description="second")
+
+    request = _transform([{"role": "user", "content": "hi"}, _withdrawal()], tools=[_body(), first, second])
+
+    assert request["tools"] == [first, second]
+
+
+def test_a_message_that_is_not_an_object_is_forwarded_untouched():
+    messages, tools = DeepSeekAnthropicMessagesConfig._downgrade_inline_tool_definitions(
+        [{"role": "user", "content": "hi"}, "not-a-message", _withdrawal()], [_body()]
+    )
+
+    assert messages[1] == "not-a-message"
+    assert tools == []
