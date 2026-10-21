@@ -3,6 +3,7 @@ DeepSeek Anthropic-compatible messages transformation config.
 """
 
 from collections.abc import Mapping, Sequence, Set
+from dataclasses import dataclass, field
 from typing import Any, Final, NoReturn
 
 import litellm
@@ -28,6 +29,25 @@ _MAX_PROTOCOL_DEPTH: Final = 8
 
 # Returned by the walk for a block that has no provider wire form and was folded into state.
 _DROP: Final = object()
+
+
+@dataclass(slots=True)
+class _ToolLedger:
+    index: dict[str, Any]
+    withdrawn: frozenset[str] = frozenset()
+    hoisted: dict[str, Any] = field(default_factory=dict)
+    removed: set[str] = field(default_factory=set)
+
+    @classmethod
+    def over(cls, tools: Sequence[Any], withdrawn: frozenset[str] = frozenset()) -> "_ToolLedger":
+        return cls(
+            index={
+                tool["name"]: tool
+                for tool in tools
+                if isinstance(tool, Mapping) and isinstance(tool.get("name"), str) and tool["name"]
+            },
+            withdrawn=withdrawn,
+        )
 
 
 def _refuse(model: str, reason: str) -> NoReturn:
@@ -146,7 +166,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             return
         _refuse(
             model,
-            "DeepSeek /v1/messages expects tools to be a list of declarations, received %s." % type(tools).__name__,
+            f"DeepSeek /v1/messages expects tools to be a list of declarations, received {type(tools).__name__}.",
         )
 
     @staticmethod
@@ -168,9 +188,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         tool: Mapping[str, Any],
         path: str,
         model: str,
-        index: dict[str, Any],
-        hoisted: dict[str, Any],  # mutable-ok: declarations are collected in message order before tools[] is built
-        removed: set[str],  # mutable-ok: withdrawals are applied in message order before tools[] is built
+        ledger: _ToolLedger,
     ) -> Mapping[str, Any]:
         """Hoist this declaration into ``tools[]`` and return the reference that stands for it.
 
@@ -206,15 +224,15 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 "this compatibility transform requires an object input_schema. Refusing rather than "
                 "narrowing the tool." % path,
             )
-        existing: Final = index.get(name)
+        existing: Final = ledger.index.get(name)
         if existing is None:
-            hoisted[name] = declaration
-            index[name] = declaration
-        elif name in removed:
+            ledger.hoisted[name] = declaration
+            ledger.index[name] = declaration
+        elif name in ledger.removed:
             # A withdrawal has a position; the redefinition that follows it can replace the entry
             # because the final tools[] is the set that is available at the end of the conversation.
-            hoisted[name] = declaration  # rebind-ok: the walk updates the one declaration ledger it owns
-            index[name] = declaration  # rebind-ok: the walk updates the one declaration ledger it owns
+            ledger.hoisted[name] = declaration
+            ledger.index[name] = declaration
         elif cls._contract(existing) != cls._contract(declaration):
             _refuse(
                 model,
@@ -223,7 +241,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 "mid-conversation, but a redefinition has a position and one tools[] entry does not, so "
                 "this transform cannot express both. Refusing rather than picking one." % (name, path),
             )
-        removed.discard(name)
+        ledger.removed.discard(name)
         return {"type": TOOL_REFERENCE_BLOCK, "name": name}
 
     @classmethod
@@ -233,10 +251,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         path: str,
         depth: int,
         model: str,
-        index: dict[str, Any],
-        hoisted: dict[str, Any],  # mutable-ok: declarations are collected in message order before tools[] is built
-        removed: set[str],  # mutable-ok: withdrawals are applied in message order before tools[] is built
-        withdrawn: Set[str],
+        ledger: _ToolLedger,
         *,
         declares: bool,
     ) -> object:
@@ -256,9 +271,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                     "than forwarding a block that may be illegal downstream." % (path, _MAX_PROTOCOL_DEPTH),
                 )
             rewritten: Final = [
-                cls._rewrite_nodes(
-                    v, "%s[%d]" % (path, i), depth, model, index, hoisted, removed, withdrawn, declares=declares
-                )
+                cls._rewrite_nodes(v, f"{path}[{i}]", depth, model, ledger, declares=declares)
                 for i, v in enumerate(node)
             ]
             if not any(value is _DROP for value in rewritten):
@@ -275,36 +288,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 "Refusing rather than forwarding a block that cannot reach the model." % path,
             )
         if kind == TOOL_REMOVAL_BLOCK:
-            if not declares:
-                _refuse(
-                    model,
-                    "DeepSeek /v1/messages cannot convert the tool_removal at %s: only a root system "
-                    "message's own content withdraws a tool. Refusing rather than forwarding it." % path,
-                )
-            removal_tool: Final = node.get("tool")
-            if not (isinstance(removal_tool, Mapping) and removal_tool.get("type") == TOOL_REFERENCE_BLOCK):
-                _refuse(
-                    model,
-                    "DeepSeek /v1/messages cannot convert the tool_removal at %s: its 'tool' must be a "
-                    "tool_reference. A withdrawal names a tool; it does not carry a definition, and this "
-                    "transform cannot resolve an MCP reference to a name. Refusing rather than guessing." % path,
-                )
-            name: Final = removal_tool.get("name")
-            if not isinstance(name, str) or not name:
-                _refuse(
-                    model,
-                    "DeepSeek /v1/messages cannot convert the tool_removal at %s: 'tool.name' is not a "
-                    "non-empty string, so the withdrawal names nothing." % path,
-                )
-            if name not in index:
-                _refuse(
-                    model,
-                    "DeepSeek /v1/messages cannot convert the tool_removal at %s: '%s' is not declared in "
-                    "tools[] or added earlier in this request. Refusing rather than forwarding an "
-                    "unresolved withdrawal." % (path, name),
-                )
-            removed.add(name)
-            return _DROP
+            return cls._withdraw(node, path, model, ledger, declares=declares)
         if kind == TOOL_ADDITION_BLOCK:
             if not declares:
                 _refuse(
@@ -314,15 +298,15 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 )
             tool: Final = node.get("tool")
             if isinstance(tool, Mapping) and tool.get("type") == INLINE_TOOL_DEFINITION_BLOCK:
-                reference: Final = cls._reference_for(tool, path + ".tool", model, index, hoisted, removed)
-                if reference.get("name") in withdrawn:
+                reference: Final = cls._reference_for(tool, path + ".tool", model, ledger)
+                if reference.get("name") in ledger.withdrawn:
                     return _DROP
                 return cls._replace(node, "tool", reference)
             if isinstance(tool, Mapping) and tool.get("type") == TOOL_REFERENCE_BLOCK:
                 reference_name: Final = tool.get("name")
-                if isinstance(reference_name, str) and reference_name in withdrawn:
+                if isinstance(reference_name, str) and reference_name in ledger.withdrawn:
                     return _DROP
-                return cls._re_added(node, tool, removed)
+                return cls._re_added(node, tool, ledger.removed)
             _refuse(
                 model,
                 "DeepSeek /v1/messages cannot convert the tool_addition at %s: its 'tool' is neither a "
@@ -334,19 +318,42 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 return cls._replace(
                     node,
                     "content",
-                    cls._rewrite_nodes(
-                        content,
-                        path + ".content",
-                        depth + 1,
-                        model,
-                        index,
-                        hoisted,
-                        removed,
-                        withdrawn,
-                        declares=False,
-                    ),
+                    cls._rewrite_nodes(content, path + ".content", depth + 1, model, ledger, declares=False),
                 )
         return node
+
+    @staticmethod
+    def _withdraw(node: Mapping[str, Any], path: str, model: str, ledger: _ToolLedger, *, declares: bool) -> object:
+        if not declares:
+            _refuse(
+                model,
+                f"DeepSeek /v1/messages cannot convert the tool_removal at {path}: only a root system "
+                "message's own content withdraws a tool. Refusing rather than forwarding it.",
+            )
+        removal_tool: Final = node.get("tool")
+        if not (isinstance(removal_tool, Mapping) and removal_tool.get("type") == TOOL_REFERENCE_BLOCK):
+            _refuse(
+                model,
+                f"DeepSeek /v1/messages cannot convert the tool_removal at {path}: its 'tool' must be a "
+                "tool_reference. A withdrawal names a tool; it does not carry a definition, and this "
+                "transform cannot resolve an MCP reference to a name. Refusing rather than guessing.",
+            )
+        name: Final = removal_tool.get("name")
+        if not isinstance(name, str) or not name:
+            _refuse(
+                model,
+                f"DeepSeek /v1/messages cannot convert the tool_removal at {path}: 'tool.name' is not a "
+                "non-empty string, so the withdrawal names nothing.",
+            )
+        if name not in ledger.index:
+            _refuse(
+                model,
+                f"DeepSeek /v1/messages cannot convert the tool_removal at {path}: '{name}' is not declared in "
+                "tools[] or added earlier in this request. Refusing rather than forwarding an "
+                "unresolved withdrawal.",
+            )
+        ledger.removed.add(name)
+        return _DROP
 
     @staticmethod
     def _re_added(node: Mapping[str, Any], tool: Mapping[str, Any], removed: set[str]) -> Mapping[str, Any]:
@@ -357,7 +364,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return node
 
     @staticmethod
-    def _tool_name(tool: Any) -> str | None:
+    def _tool_name(tool: object) -> str | None:
         if isinstance(tool, Mapping):
             name: Final = tool.get("name")
             if isinstance(name, str) and name:
@@ -365,38 +372,34 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return None
 
     @classmethod
-    def _is_removed(cls, tool: Any, removed: Set[str]) -> bool:
+    def _is_removed(cls, tool: object, removed: Set[str]) -> bool:
         name: Final = cls._tool_name(tool)
         return isinstance(name, str) and name in removed
 
     @classmethod
-    def _kept_tool(cls, tool: Any, index: Mapping[str, Any]) -> Any:
+    def _kept_tool(cls, tool: object, hoisted: Mapping[str, object]) -> object:
         name: Final = cls._tool_name(tool)
-        return index[name] if isinstance(name, str) and name in index else tool
+        return hoisted[name] if isinstance(name, str) and name in hoisted else tool
 
     @classmethod
     def _rewrite_message(
         cls,
-        message: Mapping[str, Any],
+        message: object,
         position: int,
         model: str,
-        index: dict[str, Any],  # mutable-ok: the walk accumulates declarations into this shared index
-        hoisted: dict[str, Any],  # mutable-ok: declarations are collected in message order before tools[] is built
-        removed: set[str],  # mutable-ok: withdrawals are applied in message order before tools[] is built
-        withdrawn: Set[str],
-    ) -> Mapping[str, Any] | None:
+        ledger: _ToolLedger,
+    ) -> object | None:
+        if not isinstance(message, Mapping):
+            return message
         content: Final = message.get("content")
         if not isinstance(content, list):
             return message
         rewritten: Final = cls._rewrite_nodes(
             content,
-            "messages[%d].content" % position,
+            f"messages[{position}].content",
             0,
             model,
-            index,
-            hoisted,
-            removed,
-            withdrawn,
+            ledger,
             declares=message.get("role") == "system",
         )
         if content and isinstance(rewritten, list) and not rewritten:
@@ -407,21 +410,23 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
     def _final_tools(
         cls,
         tools: Sequence[Any],
-        index: Mapping[str, Any],
-        hoisted: Mapping[str, Any],
-        removed: Set[str],
-    ) -> list[Any]:  # mutable-ok: tools[] is a JSON array on the wire
+        ledger: _ToolLedger,
+    ) -> list[object]:  # mutable-ok: tools[] is a JSON array on the wire
         original_names: Final = frozenset(name for tool in tools if (name := cls._tool_name(tool)) is not None)
-        kept_originals: Final = [cls._kept_tool(tool, index) for tool in tools if not cls._is_removed(tool, removed)]
+        kept_originals: Final = [
+            cls._kept_tool(tool, ledger.hoisted) for tool in tools if not cls._is_removed(tool, ledger.removed)
+        ]
         appended: Final = [
-            declaration for name, declaration in hoisted.items() if name not in original_names and name not in removed
+            declaration
+            for name, declaration in ledger.hoisted.items()
+            if name not in original_names and name not in ledger.removed
         ]
         return [*kept_originals, *appended]  # mutable-ok: tools[] is a JSON array on the wire
 
     @classmethod
     def _downgrade_inline_tool_definitions(
         cls, messages: list[dict], tools: list[Any], model: str = "deepseek"
-    ) -> tuple[list[Mapping[str, Any]], list[Any]]:
+    ) -> tuple[list[object], list[object]]:
         """Move inline tool definitions into tools[] and reference them by name.
 
         DeepSeek accepts ``tool_reference`` but has no ``tool_definition`` variant, so an inlined
@@ -446,30 +451,17 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         # First pass: the final set of names still withdrawn. Additions for these names cannot
         # stay as references, because the provider resolves every reference against the final
         # tools[], where the name is deliberately absent.
-        analysis_index: Final[dict[str, Any]] = {  # mutable-ok: analysis ledger for one walk
-            tool["name"]: tool
-            for tool in tools
-            if isinstance(tool, Mapping) and isinstance(tool.get("name"), str) and tool["name"]
-        }  # mutable-ok: the wire tools[] is a JSON array
-        analysis_hoisted: Final[dict[str, Any]] = {}  # mutable-ok: analysis ledger for one walk
-        analysis_removed: Final[set[str]] = set()  # mutable-ok: analysis ledger for one walk
+        analysis: Final = _ToolLedger.over(tools)
         for i, message in enumerate(messages):
-            cls._rewrite_message(message, i, model, analysis_index, analysis_hoisted, analysis_removed, frozenset())
-        withdrawn: Final = frozenset(analysis_removed)
+            cls._rewrite_message(message, i, model, analysis)
 
         # Second pass: rewrite for the provider, dropping the historical additions of names that
         # are still withdrawn at the end while keeping the ledger that validates every removal.
-        index: Final[dict[str, Any]] = {
-            tool["name"]: tool
-            for tool in tools
-            if isinstance(tool, Mapping) and isinstance(tool.get("name"), str) and tool["name"]
-        }
-        hoisted: Final[dict[str, Any]] = {}  # mutable-ok: declarations are collected before tools[] is built
-        removed: Final[set[str]] = set()  # mutable-ok: withdrawals are applied before tools[] is built
-        converted: Final[list[Mapping[str, Any]]] = [
+        ledger: Final = _ToolLedger.over(tools, frozenset(analysis.removed))
+        converted: Final = [
             rewritten
             for i, message in enumerate(messages)
-            if (rewritten := cls._rewrite_message(message, i, model, index, hoisted, removed, withdrawn)) is not None
+            if (rewritten := cls._rewrite_message(message, i, model, ledger)) is not None
         ]
         if messages and not converted:
             _refuse(
@@ -477,14 +469,14 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
                 "DeepSeek /v1/messages cannot forward a request whose messages were all tool_removal "
                 "blocks: no message would remain. Refusing rather than sending an empty conversation.",
             )
-        if hoisted or removed:
+        if ledger.hoisted or ledger.removed:
             verbose_logger.debug(
                 "DeepSeek /v1/messages: converted inline tool_definition blocks to tool_reference and "
                 "applied tool_removal withdrawals, hoisting %d declaration(s) and withdrawing %d name(s).",
-                len(hoisted),
-                len(removed),
+                len(ledger.hoisted),
+                len(ledger.removed),
             )
-        return converted, cls._final_tools(tools, index, hoisted, removed)
+        return converted, cls._final_tools(tools, ledger)
 
     def transform_anthropic_messages_request(
         self,
