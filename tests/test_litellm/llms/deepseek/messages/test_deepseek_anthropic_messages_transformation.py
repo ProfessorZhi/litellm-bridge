@@ -417,7 +417,9 @@ def test_a_schemaless_declaration_is_refused_even_when_the_name_is_already_decla
         _transform(_messages({"name": _TOOL}), tools=[{"name": _TOOL, "description": "pre"}])
 
 
-@pytest.mark.parametrize("tool", [{"type": "text", "text": "x"}, None, "get_weather"], ids=["block", "absent", "string"])
+@pytest.mark.parametrize(
+    "tool", [{"type": "text", "text": "x"}, None, "get_weather"], ids=["block", "absent", "string"]
+)
 def test_an_addition_whose_tool_is_neither_a_definition_nor_a_reference_is_refused(tool):
     with pytest.raises(litellm.BadRequestError):
         _transform([{"role": "system", "content": [{"type": "tool_addition", "tool": tool}]}])
@@ -442,8 +444,11 @@ _BARE = {"type": "tool_definition", "definition": _body()}
         _BARE,
         {"type": "tool_definition", **_body()},
         {"type": "tool_result", "tool_use_id": "t", "content": [_BARE]},
-        {"type": "tool_result", "tool_use_id": "t", "content": [{"type": "tool_result", "tool_use_id": "t2",
-                                                                 "content": [_BARE]}]},
+        {
+            "type": "tool_result",
+            "tool_use_id": "t",
+            "content": [{"type": "tool_result", "tool_use_id": "t2", "content": [_BARE]}],
+        },
     ],
     ids=["nested", "flat", "under-a-tool-result", "deeper"],
 )
@@ -520,7 +525,9 @@ def test_a_tools_entry_that_is_a_content_block_is_refused(tools):
         _transform([{"role": "user", "content": "hi"}], tools=[tools])
 
 
-@pytest.mark.parametrize("tools", [{"name": "x"}, "not-a-list", 42, ({"name": "x"},)], ids=["dict", "str", "int", "tuple"])
+@pytest.mark.parametrize(
+    "tools", [{"name": "x"}, "not-a-list", 42, ({"name": "x"},)], ids=["dict", "str", "int", "tuple"]
+)
 def test_a_non_list_tools_container_is_refused(tools):
     # RED before the guard: a dict yielded its keys, a str its characters, an int a TypeError
     with pytest.raises(litellm.BadRequestError):
@@ -546,11 +553,27 @@ def test_user_data_that_merely_mentions_a_block_type_is_untouched():
     # provider never parses a block out of them, so neither is scanned nor rejected
     messages = [
         {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "t",
-                                           "input": {"note": "the block is called tool_definition",
-                                                     "shape": {"type": "tool_definition"}}}]},
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1",
-                                      "content": [{"type": "text", "text": "unknown variant `tool_definition`"}]}]},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "t",
+                    "input": {"note": "the block is called tool_definition", "shape": {"type": "tool_definition"}},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": [{"type": "text", "text": "unknown variant `tool_definition`"}],
+                }
+            ],
+        },
     ]
 
     assert _transform(messages)["messages"] == messages
@@ -574,11 +597,230 @@ def test_a_definition_in_an_unread_content_field_is_left_alone(block):
 
 @pytest.mark.parametrize("type_field", [{}, {"type": "custom"}], ids=["untyped", "custom"])
 def test_a_schema_property_named_like_a_block_type_is_allowed(type_field):
-    tools = [{**type_field, "name": "t", "description": "d",
-              "input_schema": {"type": "object",
-                               "properties": {"tool_definition": {"type": "string"},
-                                              "tool_reference": {"type": "string"}}}}]
+    tools = [
+        {
+            **type_field,
+            "name": "t",
+            "description": "d",
+            "input_schema": {
+                "type": "object",
+                "properties": {"tool_definition": {"type": "string"}, "tool_reference": {"type": "string"}},
+            },
+        }
+    ]
 
     request = _transform([{"role": "user", "content": "hi"}], tools=tools)
 
     assert request["tools"][0]["name"] == "t"
+
+
+# --- tool_removal: a withdrawal must change what the provider may call ---
+
+_OTHER_TOOL = "mcp__example__kept"
+
+
+def _removal(name=_TOOL):
+    return {"type": "tool_removal", "tool": {"type": "tool_reference", "name": name}}
+
+
+def _withdrawal(*names):
+    withdrawn = names or (_TOOL,)
+    return {"role": "system", "content": [{"type": "text", "text": "update"}, *(_removal(name) for name in withdrawn)]}
+
+
+def _removal_only(*names):
+    withdrawn = names or (_TOOL,)
+    return {"role": "system", "content": [_removal(name) for name in withdrawn]}
+
+
+def _outbound_block_types(request):
+    return [
+        block.get("type")
+        for message in request["messages"]
+        for block in (message.get("content") or [])
+        if isinstance(block, dict)
+    ]
+
+
+def test_a_withdrawal_removes_the_tool_and_keeps_the_text():
+    messages = [{"role": "user", "content": "hi"}, _withdrawal()]
+
+    request = _transform(messages, tools=[_body()])
+
+    assert request["tools"] == []
+    assert request["messages"][1]["content"] == [{"type": "text", "text": "update"}]
+    assert "tool_removal" not in _outbound_block_types(request)
+
+
+def test_a_withdrawal_leaves_other_declared_tools_alone():
+    other = _body(name=_OTHER_TOOL)
+
+    request = _transform([{"role": "user", "content": "hi"}, _withdrawal()], tools=[_body(), other])
+
+    assert request["tools"] == [other]
+
+
+def test_a_withdrawal_preserves_cache_control_on_remaining_tools():
+    other = {**_body(name=_OTHER_TOOL), "cache_control": {"type": "ephemeral"}}
+
+    request = _transform([{"role": "user", "content": "hi"}, _withdrawal()], tools=[_body(), other])
+
+    assert request["tools"] == [other]
+
+
+def test_a_withdrawal_of_an_undeclared_tool_is_refused():
+    with pytest.raises(litellm.BadRequestError) as excinfo:
+        _transform([{"role": "user", "content": "hi"}, _withdrawal("not_declared")], tools=[_body()])
+
+    assert "not declared" in str(excinfo.value)
+
+
+def test_a_withdrawal_of_the_same_tool_twice_is_idempotent():
+    request = _transform([{"role": "user", "content": "hi"}, _withdrawal(_TOOL, _TOOL)], tools=[_body()])
+
+    assert request["tools"] == []
+
+
+def test_a_withdrawn_tool_can_be_reoffered_by_reference():
+    reoffer = {"type": "tool_addition", "tool": {"type": "tool_reference", "name": _TOOL}}
+    messages = [{"role": "user", "content": "hi"}, {"role": "system", "content": [_removal(), reoffer]}]
+
+    request = _transform(messages, tools=[_body()])
+
+    assert request["tools"] == [_body()]
+    assert request["messages"][1]["content"] == [reoffer]
+
+
+def test_a_withdrawn_tool_can_be_redefined_by_value():
+    replacement = _body(description="batch docs, revision two")
+    redefine = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": replacement}}
+    messages = [{"role": "user", "content": "hi"}, {"role": "system", "content": [_removal(), redefine]}]
+
+    request = _transform(messages, tools=[_body()])
+
+    assert request["tools"] == [replacement]
+    assert request["messages"][1]["content"][0]["tool"] == {"type": "tool_reference", "name": _TOOL}
+
+
+def test_a_tool_added_and_withdrawn_in_one_message_is_absent():
+    addition = _addition(_body())["content"][0]
+    messages = [{"role": "user", "content": "hi"}, {"role": "system", "content": [addition, _removal()]}]
+
+    request = _transform(messages, tools=[])
+
+    assert request["tools"] == []
+
+
+def test_a_withdrawal_after_an_earlier_addition_is_honored():
+    messages = [{"role": "user", "content": "hi"}, _addition(_body()), _withdrawal()]
+
+    request = _transform(messages, tools=[])
+
+    assert request["tools"] == []
+
+
+def test_a_withdrawal_outside_a_system_message_is_refused():
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": [_removal()]}], tools=[_body()])
+
+
+def test_a_withdrawal_inside_a_tool_result_is_refused():
+    result = {"type": "tool_result", "tool_use_id": "toolu_01", "content": [_removal()]}
+
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": [result]}], tools=[_body()])
+
+
+def test_a_withdrawal_that_carries_a_definition_is_refused():
+    block = {"type": "tool_removal", "tool": {"type": "tool_definition", "definition": _body()}}
+
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": "hi"}, {"role": "system", "content": [block]}], tools=[_body()])
+
+
+def test_a_withdrawal_with_an_mcp_reference_is_refused():
+    block = {"type": "tool_removal", "tool": {"type": "mcp_tool_reference", "server_name": "example", "name": _TOOL}}
+
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": "hi"}, {"role": "system", "content": [block]}], tools=[_body()])
+
+
+def test_a_withdrawal_without_a_name_is_refused():
+    block = {"type": "tool_removal", "tool": {"type": "tool_reference"}}
+
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": "hi"}, {"role": "system", "content": [block]}], tools=[_body()])
+
+
+def test_a_tool_removal_entry_in_tools_is_refused():
+    with pytest.raises(litellm.BadRequestError):
+        _transform([{"role": "user", "content": "hi"}], tools=[_removal()])
+
+
+def test_a_system_message_that_only_withdraws_is_dropped():
+    messages = [{"role": "user", "content": "hi"}, _removal_only()]
+
+    request = _transform(messages, tools=[_body()])
+
+    assert request["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_dropping_every_message_is_refused():
+    with pytest.raises(litellm.BadRequestError):
+        _transform([_removal_only()], tools=[_body()])
+
+
+def test_a_withdrawal_preserves_thinking_and_tool_history():
+    messages = [
+        {"role": "user", "content": "use it"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "I should call it.", "signature": "sig"},
+                {"type": "tool_use", "id": "toolu_01", "name": _TOOL, "input": {}},
+            ],
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01", "content": "ok"}]},
+        _withdrawal(),
+    ]
+
+    request = _transform(messages, tools=[_body()])
+
+    assert request["messages"][1] == messages[1]
+    assert request["messages"][2] == messages[2]
+    assert request["tools"] == []
+
+
+def test_streaming_and_non_streaming_withdrawal_agree():
+    messages = [{"role": "user", "content": "hi"}, _withdrawal()]
+
+    non_stream = _transform(messages, tools=[_body()], stream=False)
+    stream = _transform(messages, tools=[_body()], stream=True)
+
+    assert non_stream["messages"] == stream["messages"]
+    assert non_stream["tools"] == stream["tools"]
+
+
+def test_a_withdrawal_in_user_data_is_left_alone():
+    messages = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "t",
+                    "input": {"note": "tool_removal", "shape": {"type": "tool_removal"}},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "tool_removal"}]}
+            ],
+        },
+    ]
+
+    assert _transform(messages)["messages"] == messages
