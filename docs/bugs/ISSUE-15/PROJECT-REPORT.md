@@ -60,7 +60,7 @@
 - 本地 `pytest tests/test_litellm/llms/deepseek/`：**119 passed**（最终提交之后的证据见 `RUN-0009`）。
 - `ruff check`、`ruff format --check`、`git diff --check`：通过；候选工作树 clean。
 - Anthropic pass-through 扩展套件曾记录 249 passed / 16 failed，16 个失败在旧基线亦出现；这不是整仓 full CI 通过的证明。
-- 最新 PR head 的 GitHub Actions 三个 check（两个 PR-title、一个 unit-test）均在**没有分配 runner / 没有执行步骤**时失败。平台给出的原因是账户付款失败或 Actions spending limit；因此正式 CI 状态为 **NOT_RUN / blocked by billing**，而非代码测试失败。
+- 对功能候选提交 `841fa33f` 的 GitHub Actions 检查，两个 PR-title 和一个 unit-test 作业均在**没有分配 runner / 没有执行步骤**时失败；GitHub 注释指出账户付款失败或 Actions spending limit。其后文档提交亦触发了未执行测试步骤就失败的检查。正式 CI **尚未通过**；恢复 CI 计费后需对 PR 最新 HEAD 重新运行并验收，不能把本地测试当作 CI PASS。
 - 独立代码审查未发现高风险 blocker；已识别残余测试边界：撤销→重加→再撤销、最终撤销但历史定义与顶层同名且 contract 冲突的情况。
 
 ## 6. G5 HOLD：尚未关闭的交付阻断
