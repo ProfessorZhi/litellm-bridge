@@ -43,12 +43,7 @@ interface Accumulator {
   droppedBuckets: number;
 }
 
-export function groupByModel(
-  buckets: ChannelBucket[],
-  windowSec: number,
-  bucketSec: number,
-  now: number,
-): Group[] {
+export function groupByModel(buckets: ChannelBucket[], windowSec: number, bucketSec: number, now: number): Group[] {
   const numSeg = Math.floor(windowSec / bucketSec);
   const segMs = bucketSec * 1000;
   const byModel = new Map<string, Accumulator>();

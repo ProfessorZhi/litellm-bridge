@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/refs, no-restricted-syntax -- fork: monitor hook uses a direct fetch to the fork endpoint; refactor tracked */
 "use client";
 
 import useAuthorized from "@/app/(dashboard)/hooks/useAuthorized";
@@ -39,8 +40,8 @@ export interface WindowOpt {
 
 // 每个时间窗对应的聚合粒度，保证状态条段数适中
 export const WINDOW_OPTIONS: WindowOpt[] = [
-  { label: "最近1小时", windowSec: 3600, bucketSec: 300 },   // 12段
-  { label: "最近1天", windowSec: 86400, bucketSec: 3600 },   // 24段
+  { label: "最近1小时", windowSec: 3600, bucketSec: 300 }, // 12段
+  { label: "最近1天", windowSec: 86400, bucketSec: 3600 }, // 24段
   { label: "最近7天", windowSec: 604800, bucketSec: 21600 }, // 28段
 ];
 

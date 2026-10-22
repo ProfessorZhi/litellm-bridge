@@ -59,7 +59,10 @@ describe("groupByModel slot placement", () => {
 
   it("ignores a null bucket without dropping or misplacing anything", () => {
     const groups = groupByModel(
-      [bucket({ bucket: null, total_requests: 0 }), bucket({ bucket: atOffset(-60_000), total_requests: 5, success_requests: 5, health: 1 })],
+      [
+        bucket({ bucket: null, total_requests: 0 }),
+        bucket({ bucket: atOffset(-60_000), total_requests: 5, success_requests: 5, health: 1 }),
+      ],
       WINDOW_SEC,
       BUCKET_SEC,
       NOW,
@@ -70,12 +73,7 @@ describe("groupByModel slot placement", () => {
   });
 
   it("ignores the literal string None the backend used to emit for empty buckets", () => {
-    const groups = groupByModel(
-      [bucket({ bucket: "None" })],
-      WINDOW_SEC,
-      BUCKET_SEC,
-      NOW,
-    );
+    const groups = groupByModel([bucket({ bucket: "None" })], WINDOW_SEC, BUCKET_SEC, NOW);
     expect(groups[0].slots).toHaveLength(NUM_SEG);
     expect(groups[0].slots.every((slot) => slot === null)).toBe(true);
     expect(groups[0].droppedBuckets).toBe(0);
@@ -130,8 +128,22 @@ describe("groupByModel totals", () => {
   it("sums the four request counts independently so other requests stay visible", () => {
     const groups = groupByModel(
       [
-        bucket({ total_requests: 100, success_requests: 90, failed_requests: 8, other_requests: 2, client_failures: 5, channel_failures: 3 }),
-        bucket({ total_requests: 50, success_requests: 45, failed_requests: 5, other_requests: 0, client_failures: 1, channel_failures: 4 }),
+        bucket({
+          total_requests: 100,
+          success_requests: 90,
+          failed_requests: 8,
+          other_requests: 2,
+          client_failures: 5,
+          channel_failures: 3,
+        }),
+        bucket({
+          total_requests: 50,
+          success_requests: 45,
+          failed_requests: 5,
+          other_requests: 0,
+          client_failures: 1,
+          channel_failures: 4,
+        }),
       ],
       WINDOW_SEC,
       BUCKET_SEC,
@@ -170,7 +182,16 @@ describe("groupByModel totals", () => {
 describe("channelAvailability", () => {
   it("divides by success plus channel failures, not by total requests", () => {
     const groups = groupByModel(
-      [bucket({ total_requests: 1000, success_requests: 900, failed_requests: 50, other_requests: 50, client_failures: 40, channel_failures: 10 })],
+      [
+        bucket({
+          total_requests: 1000,
+          success_requests: 900,
+          failed_requests: 50,
+          other_requests: 50,
+          client_failures: 40,
+          channel_failures: 10,
+        }),
+      ],
       WINDOW_SEC,
       BUCKET_SEC,
       NOW,
@@ -181,7 +202,15 @@ describe("channelAvailability", () => {
 
   it("is 100 percent when the only failures are provably caller-caused", () => {
     const groups = groupByModel(
-      [bucket({ total_requests: 100, success_requests: 90, failed_requests: 10, client_failures: 10, channel_failures: 0 })],
+      [
+        bucket({
+          total_requests: 100,
+          success_requests: 90,
+          failed_requests: 10,
+          client_failures: 10,
+          channel_failures: 0,
+        }),
+      ],
       WINDOW_SEC,
       BUCKET_SEC,
       NOW,
@@ -191,7 +220,16 @@ describe("channelAvailability", () => {
 
   it("counts unclassified failures against availability by construction", () => {
     const groups = groupByModel(
-      [bucket({ total_requests: 100, success_requests: 95, failed_requests: 5, client_failures: 0, channel_failures: 5, unclassified_failures: 5 })],
+      [
+        bucket({
+          total_requests: 100,
+          success_requests: 95,
+          failed_requests: 5,
+          client_failures: 0,
+          channel_failures: 5,
+          unclassified_failures: 5,
+        }),
+      ],
       WINDOW_SEC,
       BUCKET_SEC,
       NOW,
