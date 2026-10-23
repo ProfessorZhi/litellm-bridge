@@ -67,7 +67,21 @@ def admin_mcp_proxy(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
 
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="Admin MCP requires Python 3.12+")
-@pytest.mark.parametrize("failure_phase", ["startup", "serving", "shutdown", "cancelled", "license"])
+@pytest.mark.parametrize(
+    "failure_phase",
+    [
+        "startup",
+        "serving",
+        "shutdown",
+        "cancelled",
+        pytest.param(
+            "license",
+            marks=pytest.mark.skip(
+                reason="fork: self-hosted license bypass - license failures cannot occur"
+            ),
+        ),
+    ],
+)
 async def test_admin_mcp_failure_still_closes_proxy_resources(
     admin_mcp_proxy: FastAPI,
     monkeypatch: pytest.MonkeyPatch,

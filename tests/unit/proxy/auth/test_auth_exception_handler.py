@@ -448,7 +448,7 @@ async def test_handle_authentication_error_budget_exceeded():
         )
 
     assert exc_info.value.type == ProxyErrorTypes.budget_exceeded
-    assert int(exc_info.value.code) == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert int(exc_info.value.code) == 402  # fork: budget rejections return 402
 
 
 @pytest.mark.asyncio
