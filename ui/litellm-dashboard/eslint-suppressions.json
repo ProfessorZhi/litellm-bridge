@@ -231,9 +231,6 @@
     "max-lines": {
       "count": 1
     },
-    "react-hooks/set-state-in-effect": {
-      "count": 1
-    },
     "react/no-unescaped-entities": {
       "count": 2
     }
@@ -433,16 +430,6 @@
     }
   },
   "src/app/(dashboard)/hooks/projects/useCreateProject.ts": {
-    "no-restricted-syntax": {
-      "count": 1
-    }
-  },
-  "src/app/(dashboard)/hooks/projects/useDeleteProject.test.ts": {
-    "react/display-name": {
-      "count": 1
-    }
-  },
-  "src/app/(dashboard)/hooks/projects/useDeleteProject.ts": {
     "no-restricted-syntax": {
       "count": 1
     }
@@ -654,11 +641,6 @@
   "src/app/(dashboard)/models-and-endpoints/components/ModelRetrySettingsTab.tsx": {
     "no-nested-ternary": {
       "count": 1
-    }
-  },
-  "src/app/(dashboard)/models-and-endpoints/utils/modelDataTransformer.ts": {
-    "prefer-const": {
-      "count": 6
     }
   },
   "src/app/(dashboard)/old-usage/_components/usage.tsx": {
@@ -972,11 +954,6 @@
       "count": 2
     }
   },
-  "src/app/(dashboard)/projects/_components/ProjectKeysSection.tsx": {
-    "react-hooks/set-state-in-effect": {
-      "count": 1
-    }
-  },
   "src/app/(dashboard)/projects/_components/ProjectModals/ProjectBaseForm.tsx": {
     "react-hooks/set-state-in-effect": {
       "count": 2
@@ -1071,7 +1048,7 @@
       "count": 1
     },
     "prefer-const": {
-      "count": 2
+      "count": 1
     }
   },
   "src/app/(dashboard)/search-tools/_components/SearchTools.tsx": {
@@ -1136,11 +1113,6 @@
       "count": 1
     }
   },
-  "src/app/(dashboard)/usage/_components/components/EntityUsage/EntityUsage.tsx": {
-    "local/no-complex-jsx-arrow": {
-      "count": 2
-    }
-  },
   "src/app/(dashboard)/usage/_components/components/UsageAIChatPanel.tsx": {
     "no-nested-ternary": {
       "count": 1
@@ -1150,21 +1122,7 @@
     }
   },
   "src/app/(dashboard)/usage/_components/components/UsagePageView.tsx": {
-    "local/no-complex-jsx-arrow": {
-      "count": 2
-    },
-    "max-lines": {
-      "count": 1
-    },
     "react-hooks/purity": {
-      "count": 1
-    },
-    "react-hooks/set-state-in-effect": {
-      "count": 3
-    }
-  },
-  "src/app/(dashboard)/usage/_components/hooks/usePaginatedDailyActivity.ts": {
-    "react-hooks/refs": {
       "count": 1
     },
     "react-hooks/set-state-in-effect": {
@@ -1206,11 +1164,6 @@
     },
     "react-hooks/set-state-in-effect": {
       "count": 1
-    }
-  },
-  "src/app/(dashboard)/vector-stores/_components/VectorStoreForm.tsx": {
-    "no-nested-ternary": {
-      "count": 2
     }
   },
   "src/app/(dashboard)/vector-stores/_components/index.tsx": {
@@ -1304,11 +1257,6 @@
       "count": 1
     }
   },
-  "src/components/EntityUsageExport/utils.ts": {
-    "max-params": {
-      "count": 3
-    }
-  },
   "src/components/GuardrailSettingsView.tsx": {
     "no-nested-ternary": {
       "count": 1
@@ -1399,9 +1347,6 @@
     },
     "prefer-const": {
       "count": 2
-    },
-    "react-hooks/set-state-in-effect": {
-      "count": 1
     }
   },
   "src/components/TeamsPage/teamTableColumns.tsx": {
@@ -1627,14 +1572,6 @@
       "count": 1
     }
   },
-  "src/components/common_components/fetch_teams.tsx": {
-    "local/filename-pascal-case": {
-      "count": 1
-    },
-    "max-params": {
-      "count": 1
-    }
-  },
   "src/components/common_components/simple_table.tsx": {
     "local/filename-pascal-case": {
       "count": 1
@@ -1706,9 +1643,6 @@
   "src/components/key_team_helpers/key_list.tsx": {
     "local/filename-pascal-case": {
       "count": 1
-    },
-    "react-hooks/set-state-in-effect": {
-      "count": 1
     }
   },
   "src/components/key_team_helpers/transform_key_info.tsx": {
@@ -1756,6 +1690,37 @@
   "src/components/logging_settings_view.tsx": {
     "local/filename-pascal-case": {
       "count": 1
+    }
+  },
+  "src/components/logs/detail/LogDetailsDrawer.tsx": {
+    "no-nested-ternary": {
+      "count": 2
+    },
+    "react-hooks/set-state-in-effect": {
+      "count": 2
+    }
+  },
+  "src/components/logs/detail/sections/EvalViewer/EvalViewer.tsx": {
+    "no-nested-ternary": {
+      "count": 1
+    }
+  },
+  "src/components/logs/detail/sections/GuardrailViewer/CompliancePanel.tsx": {
+    "no-nested-ternary": {
+      "count": 2
+    },
+    "react-hooks/set-state-in-effect": {
+      "count": 1
+    }
+  },
+  "src/components/logs/detail/sections/GuardrailViewer/ContentFilterDetails.tsx": {
+    "no-nested-ternary": {
+      "count": 1
+    }
+  },
+  "src/components/logs/detail/sections/GuardrailViewer/GuardrailViewer.tsx": {
+    "no-nested-ternary": {
+      "count": 3
     }
   },
   "src/components/mcp_server_management/MCPToolPermissions.tsx": {
@@ -1807,11 +1772,6 @@
       "count": 1
     }
   },
-  "src/components/molecules/cost_optimization_feedback_banner.tsx": {
-    "local/filename-pascal-case": {
-      "count": 1
-    }
-  },
   "src/components/navbar.tsx": {
     "local/filename-pascal-case": {
       "count": 1
@@ -1825,16 +1785,16 @@
       "count": 1
     },
     "max-params": {
-      "count": 23
+      "count": 15
     },
     "no-nested-ternary": {
       "count": 5
     },
     "no-restricted-syntax": {
-      "count": 152
+      "count": 140
     },
     "prefer-const": {
-      "count": 32
+      "count": 29
     }
   },
   "src/components/object_permissions_view.tsx": {
@@ -1878,9 +1838,6 @@
   },
   "src/components/per_user_usage.tsx": {
     "local/filename-pascal-case": {
-      "count": 1
-    },
-    "react-hooks/set-state-in-effect": {
       "count": 1
     }
   },
@@ -2311,84 +2268,12 @@
       "count": 1
     }
   },
-  "src/components/user_dashboard.tsx": {
-    "local/filename-pascal-case": {
-      "count": 1
-    },
-    "prefer-const": {
-      "count": 1
-    },
-    "react-hooks/set-state-in-effect": {
-      "count": 1
-    }
-  },
   "src/components/vector_store_management/types.tsx": {
     "local/filename-pascal-case": {
       "count": 1
     }
   },
   "src/components/vector_store_providers.tsx": {
-    "local/filename-pascal-case": {
-      "count": 1
-    }
-  },
-  "src/components/view_logs/EvalViewer/EvalViewer.tsx": {
-    "no-nested-ternary": {
-      "count": 1
-    }
-  },
-  "src/components/view_logs/GuardrailViewer/CompliancePanel.tsx": {
-    "no-nested-ternary": {
-      "count": 2
-    },
-    "react-hooks/set-state-in-effect": {
-      "count": 1
-    }
-  },
-  "src/components/view_logs/GuardrailViewer/ContentFilterDetails.tsx": {
-    "no-nested-ternary": {
-      "count": 1
-    }
-  },
-  "src/components/view_logs/GuardrailViewer/GuardrailViewer.tsx": {
-    "no-nested-ternary": {
-      "count": 4
-    }
-  },
-  "src/components/view_logs/LogDetailsDrawer/LogDetailContent.tsx": {
-    "no-nested-ternary": {
-      "count": 3
-    }
-  },
-  "src/components/view_logs/LogDetailsDrawer/LogDetailsDrawer.tsx": {
-    "no-nested-ternary": {
-      "count": 2
-    },
-    "react-hooks/set-state-in-effect": {
-      "count": 2
-    }
-  },
-  "src/components/view_logs/LogDetailsDrawer/useKeyboardNavigation.ts": {
-    "react-hooks/immutability": {
-      "count": 2
-    }
-  },
-  "src/components/view_logs/columns.tsx": {
-    "local/filename-pascal-case": {
-      "count": 1
-    }
-  },
-  "src/components/view_logs/index.tsx": {
-    "local/filename-pascal-case": {
-      "count": 1
-    }
-  },
-  "src/components/view_logs/log_filter_logic.tsx": {
-    "local/filename-pascal-case": {
-      "count": 1
-    }
-  },
-  "src/components/view_logs/logs_utils.tsx": {
     "local/filename-pascal-case": {
       "count": 1
     }

@@ -7,7 +7,7 @@ from typing import Any, Final, NoReturn
 
 import litellm
 from litellm.litellm_core_utils.litellm_logging import verbose_logger
-from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
+from litellm.llms.anthropic.pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
 from litellm.secret_managers.main import get_secret_str
@@ -85,6 +85,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             headers=headers,
             optional_params=optional_params,
             custom_llm_provider=self.custom_llm_provider or "deepseek",
+            messages=messages,
         )
 
         return headers, api_base
@@ -112,7 +113,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return f"{base_url}/v1/messages"
 
     @staticmethod
-    def _sanitize_tools_for_deepseek(tools: Any) -> Any:
+    def _sanitize_tools_for_deepseek(tools: Any) -> object:
         if not isinstance(tools, list):
             return tools
 
@@ -142,8 +143,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             return
         _refuse(
             model,
-            "DeepSeek /v1/messages expects tools to be a list of declarations, received %s."
-            % type(tools).__name__,
+            "DeepSeek /v1/messages expects tools to be a list of declarations, received %s." % type(tools).__name__,
         )
 
     @staticmethod
@@ -298,7 +298,8 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         cls._tools_or_raise(tools, model)
         misplaced: Final = next(
             (
-                i for i, tool in enumerate(tools)
+                i
+                for i, tool in enumerate(tools)
                 if isinstance(tool, Mapping) and tool.get("type") in PROTOCOL_BLOCK_TYPES
             ),
             None,
