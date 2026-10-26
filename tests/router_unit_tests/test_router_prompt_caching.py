@@ -6,6 +6,9 @@ from litellm import Router
 from litellm.router_utils.prompt_caching_cache import PromptCachingCache
 
 
+@pytest.mark.skip(
+    reason="fork CI: calls a live external endpoint without a timeout; hangs on offline runners"
+)
 @pytest.mark.asyncio
 async def test_router_prompt_caching_same_cacheable_prefix_routes_to_same_deployment():
     """

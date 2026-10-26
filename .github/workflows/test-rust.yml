@@ -104,6 +104,7 @@ jobs:
     # Trim debuginfo to keep the job's target dir within the runner's disk
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_BUILD_JOBS: "4"
     defaults:
       run:
         working-directory: litellm-rust
@@ -119,6 +120,11 @@ jobs:
       - uses: ./.github/actions/setup-uv-with-retries
         with:
           version: "0.10.9"
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Install Python dependencies for the bridge tests
         working-directory: .

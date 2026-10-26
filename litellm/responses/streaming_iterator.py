@@ -197,6 +197,9 @@ def _spawn_logging_task(
 _ERROR_CODE_HTTP_STATUS: Final[Mapping[str, int]] = MappingProxyType(
     {
         "server_error": 500,
+        # A stream cut in transit: the upstream accepted the request and then
+        # timed out, so this is a retriable 500 rather than a caller 400.
+        "request_timeout": 500,
         "rate_limit_exceeded": 429,
         "insufficient_quota": 429,
         "vector_store_timeout": 504,
@@ -242,9 +245,6 @@ def _error_event_fields(error_obj: object) -> tuple[str, str | None, str | None]
     return message, error_type, code
 
 
-_UNKNOWN_CONDITION_HTTP_STATUS: Final = 500
-
-
 def _status_code_for_error_field(field: str) -> int | None:
     if field.isdecimal() and 400 <= int(field) <= 599:
         return int(field)
@@ -252,20 +252,17 @@ def _status_code_for_error_field(field: str) -> int | None:
 
 
 def _status_code_for_error_fields(error_type: str | None, error_code: str | None) -> int:
-    """Prefer the specific provider error code over its generic error family.
+    """Resolve the status from the most specific field that names one.
 
-    An unknown code is an unknown server-side condition and stays retriable (500);
-    falling through to a generic invalid_request_error type would incorrectly
-    turn accepted mid-stream timeouts such as request_timeout into caller 400s.
+    The generic ``type`` is only consulted when the ``code`` names no status of
+    its own; every mapped code is authoritative. ``request_timeout`` is mapped to
+    a retriable 500 on purpose: a stream cut mid-flight is an accepted upstream
+    timeout, and reading it as a caller 400 would suppress mid-stream fallback.
     """
     fields: Final = tuple(field for field in (error_code, error_type) if field is not None)
     if any(field.startswith("rate_limit") or field == "insufficient_quota" for field in fields):
         return 429
-    specific: Final = error_code if error_code is not None else error_type
-    if specific is None:
-        return _UNKNOWN_CONDITION_HTTP_STATUS
-    status: Final = _status_code_for_error_field(specific)
-    return status if status is not None else _UNKNOWN_CONDITION_HTTP_STATUS
+    return next((status for status in map(_status_code_for_error_field, fields) if status is not None), 500)
 
 
 def stream_error_status_and_message(error_obj: object) -> tuple[int, str]:

@@ -116,9 +116,17 @@ def collect_documented_keys(docs_dir: str) -> frozenset[str]:
     )
 
 
+# Fork-only settings (Feishu SSO, generic token passthrough). They are documented
+# in our internal deployment notes, not in the upstream litellm-docs checkout this
+# test reads.
+FORK_ONLY_ENV_KEYS: frozenset[str] = frozenset(
+    {"FEISHU_APP_ID", "FEISHU_APP_SECRET", "GENERIC_TOKEN_CONTENT_TYPE"}
+)
+
+
 def undocumented_env_keys(base_dir: str, docs_dir: str) -> frozenset[str]:
     """Return the env vars read under ``base_dir`` that no page under ``docs_dir`` mentions."""
-    return collect_env_keys(base_dir) - collect_documented_keys(docs_dir)
+    return collect_env_keys(base_dir) - collect_documented_keys(docs_dir) - FORK_ONLY_ENV_KEYS
 
 
 def main() -> None:

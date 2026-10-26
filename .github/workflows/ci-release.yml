@@ -169,7 +169,9 @@ jobs:
   ui-unit:
     name: "前端单测 (Vitest)"
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The full dashboard suite runs ~15-20 min cold on a GitHub runner; the
+    # previous 20 min budget cancelled healthy runs at the wire.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: ui/litellm-dashboard

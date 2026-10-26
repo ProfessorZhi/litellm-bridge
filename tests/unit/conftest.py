@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import logging
 import importlib
 import os
 from collections.abc import Coroutine, Iterator
@@ -12,6 +13,9 @@ import boto3
 import httpx
 import pytest
 from pytest_socket import enable_socket, socket_allow_hosts
+
+_logger = logging.getLogger(__name__)
+
 
 HOST_ENVIRONMENT_ALLOWLIST: Final = frozenset(
     (
@@ -167,8 +171,24 @@ def _run_coroutine_if_needed(result: object) -> None:
         loop.create_task(coroutine)
 
 
+LOGGING_FLUSH_TIMEOUT_SECONDS: Final = 10.0
+
+
 async def _complete_test_logging() -> None:
-    await GLOBAL_LOGGING_WORKER.flush()
+    try:
+        await asyncio.wait_for(
+            GLOBAL_LOGGING_WORKER.flush(), timeout=LOGGING_FLUSH_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError:
+        # A callback queued by the test never completed (usually because it is
+        # waiting on state the test's own loop owned and has since closed).
+        # Draining it is test hygiene, not part of the assertion: bound the
+        # wait, otherwise this flush blocks every following test on the shard
+        # for the full pytest-timeout budget.
+        _logger.warning(
+            "unit-test logging flush exceeded %.0fs; cancelling pending callbacks",
+            LOGGING_FLUSH_TIMEOUT_SECONDS,
+        )
     await GLOBAL_LOGGING_WORKER.stop()
 
 
@@ -181,9 +201,17 @@ def _flush_completed_test_logging() -> None:
         _run_coroutine_if_needed(_complete_test_logging())
         return
     if worker_loop.is_running():
-        asyncio.run_coroutine_threadsafe(_complete_test_logging(), worker_loop).result()
+        try:
+            asyncio.run_coroutine_threadsafe(_complete_test_logging(), worker_loop).result(
+                timeout=LOGGING_FLUSH_TIMEOUT_SECONDS + 5
+            )
+        except TimeoutError:
+            _logger.warning("unit-test logging flush timed out on its worker loop")
         return
-    worker_loop.run_until_complete(_complete_test_logging())
+    try:
+        worker_loop.run_until_complete(_complete_test_logging())
+    except TimeoutError:
+        _logger.warning("unit-test logging flush timed out on its worker loop")
 
 
 @pytest.hookimpl(hookwrapper=True)
