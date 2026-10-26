@@ -8,7 +8,13 @@ from typing import Final
 
 import pytest
 
-WORKFLOW: Final = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "test-linting.yml"
+# Fork: the lint workflow is disabled and lives outside the scanned directory.
+WORKFLOW: Final = (
+    Path(__file__).resolve().parents[2]
+    / ".github"
+    / "workflows-disabled"
+    / "test-linting.yml.disabled"
+)
 DIFF_GATE: Final = re.compile(r'git diff --name-only --diff-filter=\w+ "\$GATE_BASE_SHA" HEAD -- (.+?) \|')
 GATES: Final = tuple(tuple(shlex.split(gate.group(1))) for gate in DIFF_GATE.finditer(WORKFLOW.read_text()))
 PYTHON_GATES: Final = tuple(gate for gate in GATES if gate[0].startswith(":(glob)"))

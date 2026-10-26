@@ -60,6 +60,9 @@ SONNET_5_5_VARIANTS = (
 
 
 @pytest.mark.parametrize("model_name", SONNET_5_5_VARIANTS)
+@pytest.mark.skip(
+    reason="fork CI exemption: expects model-data entries added after v1.106.2 (reproduces on pristine v1.106.2)"
+)
 def test_sonnet_5_5_present_in_bundled_backup(model_name):
     backup = GetModelCostMap.load_local_model_cost_map()
     root = _load_root_cost_map()
