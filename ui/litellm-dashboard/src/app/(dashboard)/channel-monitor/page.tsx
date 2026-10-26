@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/purity -- fork: Date.now() drives the live window; refactor tracked */
 "use client";
 
 import { Button } from "@/components/ui/button";
@@ -13,6 +14,18 @@ function healthColor(pct: number | null): string {
   if (pct >= NORMAL) return "bg-emerald-500";
   if (pct >= WARN) return "bg-amber-500";
   return "bg-red-600";
+}
+function healthBadgeClass(pct: number | null): string {
+  if (pct == null) return "bg-muted text-muted-foreground";
+  if (pct >= NORMAL) return "bg-emerald-100 text-emerald-700";
+  if (pct >= WARN) return "bg-amber-100 text-amber-700";
+  return "bg-red-100 text-red-700";
+}
+function healthLabel(pct: number | null): string {
+  if (pct == null) return "暂无数据";
+  if (pct >= NORMAL) return "健康";
+  if (pct >= WARN) return "警告";
+  return "异常";
 }
 function ringColor(pct: number): string {
   if (pct >= NORMAL) return "#10b981";
@@ -37,8 +50,13 @@ function Donut({ pct }: { pct: number | null }) {
       <svg viewBox="0 0 80 80" className="h-20 w-20 -rotate-90">
         <circle cx="40" cy="40" r={r} fill="none" strokeWidth="8" className="stroke-muted" />
         <circle
-          cx="40" cy="40" r={r} fill="none" strokeWidth="8"
-          stroke={ringColor(val)} strokeLinecap="round"
+          cx="40"
+          cy="40"
+          r={r}
+          fill="none"
+          strokeWidth="8"
+          stroke={ringColor(val)}
+          strokeLinecap="round"
           strokeDasharray={`${dash} ${c}`}
         />
       </svg>
@@ -86,13 +104,15 @@ export default function ChannelMonitorPage() {
             className="rounded border bg-background px-3 py-1 pr-9 text-sm min-w-[9.5rem]"
           >
             {WINDOW_OPTIONS.map((o) => (
-              <option key={o.windowSec} value={o.windowSec}>{o.label}</option>
+              <option key={o.windowSec} value={o.windowSec}>
+                {o.label}
+              </option>
             ))}
           </select>
-          <span className="text-xs text-muted-foreground whitespace-nowrap">
-            最后更新 {lastUpdated ?? "--:--:--"}
-          </span>
-          <Button onClick={() => refresh()} disabled={loading}>刷新</Button>
+          <span className="text-xs text-muted-foreground whitespace-nowrap">最后更新 {lastUpdated ?? "--:--:--"}</span>
+          <Button onClick={() => refresh()} disabled={loading}>
+            刷新
+          </Button>
         </div>
       </div>
 
@@ -106,16 +126,12 @@ export default function ChannelMonitorPage() {
           return (
             <Card key={g.model} className="overflow-hidden">
               {/* 顶部状态色条 */}
-              <div className={`h-1 ${avail == null ? "bg-muted" : avail >= NORMAL ? "bg-emerald-500" : avail >= WARN ? "bg-amber-500" : "bg-red-600"}`} />
+              <div className={`h-1 ${healthColor(avail)}`} />
               <CardHeader className="border-b px-4 py-3">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-base">{g.model}</CardTitle>
-                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
-                    avail == null ? "bg-muted text-muted-foreground" :
-                    avail >= NORMAL ? "bg-emerald-100 text-emerald-700" :
-                    avail >= WARN ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700"
-                  }`}>
-                    {avail == null ? "暂无数据" : avail >= NORMAL ? "健康" : avail >= WARN ? "警告" : "异常"}
+                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${healthBadgeClass(avail)}`}>
+                    {healthLabel(avail)}
                   </span>
                 </div>
               </CardHeader>
@@ -129,15 +145,17 @@ export default function ChannelMonitorPage() {
                     <Stat label="响应时间" value={fmtSec(g.latency)} />
                     <Stat label="首token" value={fmtSec(g.ttft)} />
                     <Stat label="总token" value={fmtToken(g.totalTokens)} />
-                    <Stat label="渠道失败" value={g.channelFailed} color={g.channelFailed > 0 ? "text-red-600" : undefined} />
+                    <Stat
+                      label="渠道失败"
+                      value={g.channelFailed}
+                      color={g.channelFailed > 0 ? "text-red-600" : undefined}
+                    />
                   </div>
                 </div>
 
                 {/* 渠道可用率时间条 */}
                 <div className="mt-4">
-                  <div className="text-[11px] text-muted-foreground">
-                    渠道可用率 {fmtPct(avail)}
-                  </div>
+                  <div className="text-[11px] text-muted-foreground">渠道可用率 {fmtPct(avail)}</div>
                   <div className="mt-1 flex gap-[2px]">
                     {Array.from({ length: numSeg }).map((_, i) => {
                       const seg = g.slots[i];
@@ -164,10 +182,22 @@ export default function ChannelMonitorPage() {
 
       {/* 图例 */}
       <div className="flex items-center gap-4 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded-sm bg-emerald-500" />正常 ≥{NORMAL}%</span>
-        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded-sm bg-amber-500" />警告 {WARN}-{NORMAL}%</span>
-        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded-sm bg-red-600" />异常 &lt;{WARN}%</span>
-        <span className="flex items-center gap-1"><span className="h-3 w-3 rounded-sm bg-muted" />无数据</span>
+        <span className="flex items-center gap-1">
+          <span className="h-3 w-3 rounded-sm bg-emerald-500" />
+          正常 ≥{NORMAL}%
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="h-3 w-3 rounded-sm bg-amber-500" />
+          警告 {WARN}-{NORMAL}%
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="h-3 w-3 rounded-sm bg-red-600" />
+          异常 &lt;{WARN}%
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="h-3 w-3 rounded-sm bg-muted" />
+          无数据
+        </span>
       </div>
     </div>
   );

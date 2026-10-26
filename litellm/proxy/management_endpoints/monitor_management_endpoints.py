@@ -2,15 +2,15 @@
 渠道可用性监控端点：按 model_group × 时间桶聚合健康度/延迟/吞吐量。
 数据源 PostgreSQL LiteLLM_SpendLogs（startTime 为 naive UTC，桶按北京时间对齐）。
 """
+
 from datetime import datetime
-from typing import Final, Optional
+from typing import Final
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.auth.user_api_key_auth import user_api_key_auth
-from litellm.proxy.spend_tracking.spend_management_endpoints import _is_admin_view_safe
 
 router = APIRouter()
 
@@ -19,7 +19,7 @@ _BUCKET_TZ_OFFSET_SECONDS: Final = 8 * 3600
 
 
 class ChannelBucket(BaseModel):
-    bucket: Optional[datetime] = None
+    bucket: datetime | None = None
     model_group: str
     total_requests: int = 0
     success_requests: int = 0
@@ -30,10 +30,10 @@ class ChannelBucket(BaseModel):
     upstream_failures: int = 0
     transport_failures: int = 0
     unclassified_failures: int = 0
-    avg_latency_ms: Optional[float] = None
-    avg_ttft_ms: Optional[float] = None
-    p50_ms: Optional[float] = None
-    p95_ms: Optional[float] = None
+    avg_latency_ms: float | None = None
+    avg_ttft_ms: float | None = None
+    p50_ms: float | None = None
+    p95_ms: float | None = None
     total_tokens: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -42,7 +42,7 @@ class ChannelBucket(BaseModel):
 
 class _RawBucket(BaseModel):
     model_group: str
-    bucket: Optional[datetime] = None
+    bucket: datetime | None = None
     total_requests: int = 0
     success_requests: int = 0
     failed_requests: int = 0
@@ -52,10 +52,10 @@ class _RawBucket(BaseModel):
     upstream_failures: int = 0
     transport_failures: int = 0
     unclassified_failures: int = 0
-    avg_latency: Optional[float] = None
-    avg_ttft: Optional[float] = None
-    p50: Optional[float] = None
-    p95: Optional[float] = None
+    avg_latency: float | None = None
+    avg_ttft: float | None = None
+    p50: float | None = None
+    p95: float | None = None
     total_tokens: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -110,7 +110,7 @@ async def channel_summary(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
     start_time: str = Query(...),
     end_time: str = Query(...),
-    model: Optional[str] = Query(None, description="按 model_group 过滤"),
+    model: str | None = Query(None, description="按 model_group 过滤"),
     bucket_seconds: int = Query(300, ge=60, le=86400, description="聚合桶大小(秒)"),
 ):
     # 内部用户也能看渠道健康度（放给所有登录用户）
@@ -127,7 +127,7 @@ async def channel_summary(
     # 渠道列表 = 实际配置的模型(LiteLLM_ProxyModelTable.model_name)。
     # DISTINCT 是必须的:同一 model_name 可以有多条部署记录,不 DISTINCT 会让每条部署各算一遍,
     # 把请求数放大到部署份数倍。
-    sql = f"""
+    sql = """
         WITH configured_models AS (
             SELECT DISTINCT model_name
             FROM "LiteLLM_ProxyModelTable"

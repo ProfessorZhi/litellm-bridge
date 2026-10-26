@@ -18,10 +18,14 @@ def build_ui_login_form(
 ) -> str:
     feishu_app_id = os.getenv("FEISHU_APP_ID", "")
     feishu_login_url = (
-        f"https://open.feishu.cn/open-apis/authen/v1/index"
-        f"?redirect_uri={base_url}sso/feishu/callback"
-        f"&app_id={feishu_app_id}"
-    ) if feishu_app_id else ""
+        (
+            f"https://open.feishu.cn/open-apis/authen/v1/index"
+            f"?redirect_uri={base_url}sso/feishu/callback"
+            f"&app_id={feishu_app_id}"
+        )
+        if feishu_app_id
+        else ""
+    )
     banner_html: Final = (
         f"""
         <div class="deprecation-banner">
