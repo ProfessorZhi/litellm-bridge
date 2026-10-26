@@ -2345,3 +2345,85 @@ def test_cached_responses_stream_sync_hit_triggers_success_callbacks(monkeypatch
     litellm.cache.async_add_cache.assert_not_called()
     litellm.cache.add_cache.assert_not_called()
     litellm.cache = original_cache
+
+
+@pytest.mark.asyncio
+async def test_failure_logging_can_await_state_bound_to_the_iterating_loop(monkeypatch):
+    """The failure callback must be able to await state the request's own loop owns.
+
+    Awaiting loop-bound state is the ordinary shape of any failure handler that
+    has async work to do. It is also a real lifecycle defect when the handler is
+    dispatched onto a foreign loop, because the await then raises RuntimeError
+    and the caller swallows it. What this asserts is the loop the handler runs
+    on. It does not on its own establish that any production missing spend-log
+    row came from here; that needs a persisted row to be absent, which this test
+    does not have."""
+    spend_queue: asyncio.Queue = asyncio.Queue()
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(spend_queue.get(), timeout=0.01)
+    drained: list[object] = []
+
+    class _QueueReadingLogger(CustomLogger):
+        async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+            drained.append(await spend_queue.get())
+
+    recorder: Final = _QueueReadingLogger()
+    monkeypatch.setattr(litellm, "_async_failure_callback", [recorder])
+    monkeypatch.setattr(litellm, "failure_callback", [])
+    iterator: Final = _make_iterator(
+        sse_events=_PARTIAL_OUTPUT_EVENTS,
+        logging_obj=_real_logging_obj(),
+        trailing_error=httpx.ReadError("Response payload is not completed"),
+    )
+
+    async def _produce_the_pending_update() -> None:
+        await asyncio.sleep(0.05)
+        await spend_queue.put("spend-update")
+
+    producer: Final = asyncio.create_task(_produce_the_pending_update())
+    try:
+        with pytest.raises(httpx.ReadError):
+            async for _ in iterator:
+                pass
+    finally:
+        producer.cancel()
+
+    assert drained == ["spend-update"]
+
+
+@pytest.mark.asyncio
+async def test_failure_logging_does_not_park_the_iterating_loop(monkeypatch):
+    """While the failure callback ran, the iterating loop served nothing else: a request
+    failing mid-stream stalled every other request on that worker for as long as the
+    callback took."""
+    ticks: list[int] = []
+
+    async def _ticker() -> None:
+        while True:
+            ticks.append(1)
+            await asyncio.sleep(0.01)
+
+    class _SlowFailureLogger(CustomLogger):
+        async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
+            await asyncio.sleep(0.1)
+
+    monkeypatch.setattr(litellm, "_async_failure_callback", [_SlowFailureLogger()])
+    monkeypatch.setattr(litellm, "failure_callback", [])
+    iterator: Final = _make_iterator(
+        sse_events=_PARTIAL_OUTPUT_EVENTS,
+        logging_obj=_real_logging_obj(),
+        trailing_error=httpx.ReadError("Response payload is not completed"),
+    )
+    ticker: Final = asyncio.create_task(_ticker())
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(httpx.ReadError):
+            async for _ in iterator:
+                pass
+        ticks_while_failing: Final = len(ticks)
+    finally:
+        ticker.cancel()
+
+    assert ticks_while_failing >= 3, (
+        f"the iterating loop only ran {ticks_while_failing} callbacks during failure logging"
+    )

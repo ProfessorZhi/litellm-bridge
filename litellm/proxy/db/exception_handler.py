@@ -190,6 +190,15 @@ class PrismaDBExceptionHandler:
 
         Use this for reconnect logic — data-layer errors like UniqueViolationError
         mean the DB IS reachable, so reconnecting would be pointless.
+
+        The postmaster's own unavailable states are included. While it is
+        starting up, shutting down, or replaying WAL after a crash it accepts no
+        connections at all, which is the same transient outage as an unreachable
+        server seen from the client, and it arrives the same masked way: the
+        server's ``FATAL`` text is delivered by the connector and prisma raises
+        it as a base ``DataError``, so no type check can classify it. Reconnect
+        is the right response, and it is what lets a spend-log row survive the
+        outage instead of being read as a bad row.
         """
         import prisma
 
@@ -220,6 +229,13 @@ class PrismaDBExceptionHandler:
                 "network is unreachable",
                 "no route to host",
                 "broken pipe",
+                # The postmaster's unavailable states: "... is starting up",
+                # "... is in recovery mode", "... is not yet accepting
+                # connections". Matched by the shared opening rather than by
+                # listing the spellings, which Postgres does not promise to keep
+                # closed. An ordinary FATAL, a failed authentication for
+                # instance, does not open this way and stays a data error.
+                "the database system is ",
             )
             if any(keyword in error_message for keyword in connection_keywords):
                 return True

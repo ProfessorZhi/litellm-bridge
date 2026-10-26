@@ -951,3 +951,57 @@ def test_is_lock_timeout_error_recognises_a_statement_cancelled_under_lock_timeo
 )
 def test_is_lock_timeout_error_excludes_other_failures(error: Exception) -> None:
     assert PrismaDBExceptionHandler.is_lock_timeout_error(error) is False
+
+
+def _postgres_fatal(message: str) -> DataError:
+    """A Postgres ``FATAL`` as prisma surfaces it: a base ``DataError`` (not one
+    of its data-layer subclasses) whose ``message`` the classifier reads back
+    out of ``str(e)``."""
+    return DataError({}, message=message)
+
+
+_POSTMASTER_UNAVAILABLE_MESSAGES: Final = (
+    "FATAL: the database system is in recovery mode",
+    "FATAL: the database system is starting up",
+    "FATAL: the database system is shutting down",
+    # The spelling a pooled connection actually gets back while the postmaster
+    # replays WAL, captured verbatim from a crashed postgres:16. It is the one
+    # that a list of the three states above misses.
+    "FATAL:  the database system is not yet accepting connections\n"
+    "DETAIL:  Consistent recovery state has not been yet reached.",
+)
+
+
+@pytest.mark.parametrize("message", _POSTMASTER_UNAVAILABLE_MESSAGES)
+def test_postmaster_unavailable_state_is_a_transient_outage(message: str):
+    """While the postmaster is starting up, shutting down, or replaying WAL it
+    refuses every connection, which is the same transient outage as an
+    unreachable server and must drive a reconnect rather than be read as a bad
+    row or a bad key."""
+    error: Final = _postgres_fatal(message)
+    assert PrismaDBExceptionHandler.is_database_transport_error(error) is True
+    assert PrismaDBExceptionHandler.is_database_service_unavailable_error(error) is True
+
+
+def test_recovery_mode_dataerror_is_both_a_data_error_and_an_outage():
+    """The two-part classifier contract the spend-log poison isolation gates on:
+    the exception still answers True to the data-error type check, so the outage
+    check is the only thing standing between the row and the drop path. With it,
+    a spend-log row survives a DB outage instead of being discarded as poison."""
+    error: Final = _postgres_fatal("FATAL: the database system is in recovery mode")
+    assert PrismaDBExceptionHandler.is_prisma_data_error(error) is True
+    assert PrismaDBExceptionHandler.is_database_transport_error(error) is True
+    assert PrismaDBExceptionHandler.is_database_service_unavailable_error(error) is True
+
+
+def test_postmaster_unavailable_keywords_do_not_widen_to_every_postgres_fatal():
+    """The boundary of the fix: an ordinary Postgres FATAL such as an
+    authentication failure is not a transient outage, so it must stay a data
+    error the spend-log isolation drops and never be retried as a reconnect."""
+    unavailable: Final = _postgres_fatal("FATAL: the database system is in recovery mode")
+    auth_failure: Final = _postgres_fatal('FATAL: password authentication failed for user "litellm"')
+
+    assert PrismaDBExceptionHandler.is_database_transport_error(unavailable) is True
+    assert PrismaDBExceptionHandler.is_prisma_data_error(auth_failure) is True
+    assert PrismaDBExceptionHandler.is_database_transport_error(auth_failure) is False
+    assert PrismaDBExceptionHandler.is_database_service_unavailable_error(auth_failure) is False

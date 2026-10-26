@@ -389,3 +389,74 @@ def test_spend_logs_payload_with_prompts_enabled(monkeypatch):
     payload_disabled: SpendLogsPayload = get_logging_payload(**input_args)
     assert payload_disabled["messages"] == "{}"
     assert payload_disabled["response"] == "{}"
+
+
+def _failed_responses_payload_kwargs(call_type_entry: dict) -> dict:
+    return {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "bom dia"}],
+        **call_type_entry,
+        "standard_logging_object": {
+            "call_type": "aresponses",
+            "model": "gpt-4o",
+            "model_id": "deployment-id-from-sl",
+            "model_group": "gpt-5-mini",
+            "api_base": "https://api.openai.com/v1",
+            "custom_llm_provider": "openai",
+            "metadata": {},
+            "hidden_params": {},
+            "model_map_information": {},
+        },
+    }
+
+
+def test_failed_responses_payload_keeps_call_type_from_standard_logging_object():
+    """The failure path reaches get_logging_payload through request_data, which
+    carries no call_type, so the standard logging object is the only source. An
+    empty call_type is not cosmetic: the Responses flush keys off it, and the
+    row then misses its immediate write."""
+    input_args: dict = {
+        "kwargs": _failed_responses_payload_kwargs({}),
+        "response_obj": {},
+        "start_time": datetime.datetime(2024, 6, 7, 12, 43, 30, 308604),
+        "end_time": datetime.datetime(2024, 6, 7, 12, 43, 30, 954146),
+    }
+
+    payload: SpendLogsPayload = get_logging_payload(**input_args)
+
+    assert payload["call_type"] == "aresponses"
+    assert payload["model_group"] == "gpt-5-mini"
+    assert payload["model_id"] == "deployment-id-from-sl"
+    assert payload["api_base"] == "https://api.openai.com/v1"
+    assert payload["custom_llm_provider"] == "openai"
+
+
+def test_failed_responses_payload_falls_back_when_request_call_type_is_empty():
+    """A request_data carrying an empty call_type (the failure hook's own
+    default for a lifted field) must still take the value the standard logging
+    object recorded, not the empty string."""
+    input_args: dict = {
+        "kwargs": _failed_responses_payload_kwargs({"call_type": ""}),
+        "response_obj": {},
+        "start_time": datetime.datetime(2024, 6, 7, 12, 43, 30, 308604),
+        "end_time": datetime.datetime(2024, 6, 7, 12, 43, 30, 954146),
+    }
+
+    payload: SpendLogsPayload = get_logging_payload(**input_args)
+
+    assert payload["call_type"] == "aresponses"
+
+
+def test_request_call_type_wins_over_the_standard_logging_object():
+    """The success path knows its call_type first-hand; the standard logging
+    object is a fallback and must not overwrite it."""
+    input_args: dict = {
+        "kwargs": _failed_responses_payload_kwargs({"call_type": "acompletion"}),
+        "response_obj": {},
+        "start_time": datetime.datetime(2024, 6, 7, 12, 43, 30, 308604),
+        "end_time": datetime.datetime(2024, 6, 7, 12, 43, 30, 954146),
+    }
+
+    payload: SpendLogsPayload = get_logging_payload(**input_args)
+
+    assert payload["call_type"] == "acompletion"

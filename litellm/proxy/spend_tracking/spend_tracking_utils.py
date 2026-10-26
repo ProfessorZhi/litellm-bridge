@@ -397,8 +397,16 @@ def get_request_model_access_groups(kwargs: Mapping[str, object] | None) -> tupl
 
 def _sl_attribution_fallback(
     standard_logging_payload: StandardLoggingPayload | None,
-    field: Literal["model_id", "model_group", "api_base", "custom_llm_provider"],
+    field: Literal["model_id", "model_group", "api_base", "custom_llm_provider", "call_type"],
 ) -> str:
+    """Attribution a spend-log row takes from the standard logging object.
+
+    The failure path reaches ``get_logging_payload`` through ``request_data``,
+    which is the HTTP request body plus whatever the failure hook lifted onto
+    it, and it carries none of the deployment attribution the success path gets
+    from ``model_call_details``. The standard logging object is the one carrier
+    both paths share, so a field with no other source has to be read from here.
+    """
     if standard_logging_payload is None:
         return ""
     return standard_logging_payload.get(field) or ""
@@ -525,7 +533,13 @@ def get_logging_payload(
     litellm_params: Final = kwargs.get("litellm_params", {})
     metadata: Final = get_litellm_metadata_from_kwargs(kwargs)
     completion_start_time: Final = kwargs.get("completion_start_time", end_time)
-    call_type: Final = kwargs.get("call_type")
+    standard_logging_payload: Final = cast(StandardLoggingPayload | None, kwargs.get("standard_logging_object", None))
+    # Read here rather than beside ``id`` below: the failure path has no
+    # ``call_type`` on the request body, so the standard logging object is the
+    # only source left and it has to be in hand before the first use of
+    # ``call_type``. Leaving it empty is not cosmetic: the Responses flush below
+    # keys off it, and an empty value silently costs the row its immediate write.
+    call_type: Final = kwargs.get("call_type") or _sl_attribution_fallback(standard_logging_payload, "call_type")
     cache_hit: Final = kwargs.get("cache_hit", False)
 
     # Convert response_obj to dict first
@@ -556,7 +570,6 @@ def get_logging_payload(
         usage = _combined_usage.model_dump()
 
     id = get_spend_logs_id(call_type or "acompletion", response_obj_dict, kwargs)
-    standard_logging_payload: Final = cast(StandardLoggingPayload | None, kwargs.get("standard_logging_object", None))
 
     end_user_id = get_end_user_id_for_cost_tracking(litellm_params)
 

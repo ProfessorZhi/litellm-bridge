@@ -242,6 +242,9 @@ def _error_event_fields(error_obj: object) -> tuple[str, str | None, str | None]
     return message, error_type, code
 
 
+_UNKNOWN_CONDITION_HTTP_STATUS: Final = 500
+
+
 def _status_code_for_error_field(field: str) -> int | None:
     if field.isdecimal() and 400 <= int(field) <= 599:
         return int(field)
@@ -249,10 +252,20 @@ def _status_code_for_error_field(field: str) -> int | None:
 
 
 def _status_code_for_error_fields(error_type: str | None, error_code: str | None) -> int:
+    """Prefer the specific provider error code over its generic error family.
+
+    An unknown code is an unknown server-side condition and stays retriable (500);
+    falling through to a generic invalid_request_error type would incorrectly
+    turn accepted mid-stream timeouts such as request_timeout into caller 400s.
+    """
     fields: Final = tuple(field for field in (error_code, error_type) if field is not None)
     if any(field.startswith("rate_limit") or field == "insufficient_quota" for field in fields):
         return 429
-    return next((status for status in map(_status_code_for_error_field, fields) if status is not None), 500)
+    specific: Final = error_code if error_code is not None else error_type
+    if specific is None:
+        return _UNKNOWN_CONDITION_HTTP_STATUS
+    status: Final = _status_code_for_error_field(specific)
+    return status if status is not None else _UNKNOWN_CONDITION_HTTP_STATUS
 
 
 def stream_error_status_and_message(error_obj: object) -> tuple[int, str]:
