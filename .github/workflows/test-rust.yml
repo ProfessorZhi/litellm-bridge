@@ -100,7 +100,9 @@ jobs:
 
   rust-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # CARGO_BUILD_JOBS is capped to keep the runner alive; the feature-matrix
+    # builds then need well over the old 30 min.
+    timeout-minutes: 75
     # Trim debuginfo to keep the job's target dir within the runner's disk
     env:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
