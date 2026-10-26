@@ -1,10 +1,13 @@
 name: "Enterprise Release CI"
 
-# 只在推版本 tag(v*)时触发 —— 合入 dev 不跑
+# 推版本 tag(v*) 或 push 到 dev 时触发
 on:
   push:
     tags:
       - "v*"
+    branches:
+      - dev
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -29,7 +32,7 @@ jobs:
           python-version: "3.12"
       - uses: ./.github/actions/setup-uv-with-retries
         with:
-          version: "0.10.9"
+          version: "0.13.5"
       - name: Clean python cache
         run: |
           find . -type d -name "__pycache__" -exec rm -rf {} + || true
@@ -49,11 +52,28 @@ jobs:
         run: |
           cd litellm && uv run --no-sync ruff check . ; cd ..
 
-  # ============ 2. 后端单测 (含监控) ============
+  # ============ 2. 后端单测 (fork 关键路径 + 管理接口) ============
   backend-unit:
-    name: "后端单测 (pytest, 含监控)"
+    name: "后端单测 (pytest, fork 关键路径)"
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: llmproxy
+          POSTGRES_PASSWORD: dbpassword9090
+          POSTGRES_DB: litellm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U llmproxy -d litellm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://llmproxy:dbpassword9090@localhost:5432/litellm
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,7 +83,7 @@ jobs:
           python-version: "3.12"
       - uses: ./.github/actions/setup-uv-with-retries
         with:
-          version: "0.10.9"
+          version: "0.13.5"
       - name: Cache uv dependencies
         uses: actions/cache@v4
         with:
@@ -79,10 +99,22 @@ jobs:
         env:
           PRISMA_BINARY_CACHE_DIR: ${{ runner.temp }}/prisma-cache
         run: uv run --no-sync prisma generate --schema litellm/proxy/schema.prisma
-      - name: Run tests (management_endpoints, 含监控)
+      - name: Prepare test database
+        env:
+          PRISMA_BINARY_CACHE_DIR: ${{ runner.temp }}/prisma-cache
+        run: uv run --no-sync prisma db push --schema litellm/proxy/schema.prisma --skip-generate --accept-data-loss
+      - name: Run tests (fork 关键路径)
         run: |
-          uv run --no-sync pytest tests/test_litellm/proxy/management_endpoints/management_v1 \
-            --tb=short -vv --maxfail=10 -n 2 --reruns 2 --reruns-delay 1 --durations=20
+          uv run --no-sync pytest \
+            tests/unit/proxy/management_endpoints/management_v1 \
+            tests/unit/proxy/management_endpoints/test_key_management_endpoints.py \
+            tests/unit/test_rate_limit_error_unification.py \
+            tests/unit/proxy/response_api_endpoints/test_endpoints.py \
+            tests/proxy_behavior/management/test_channel_monitor_summary.py \
+            tests/unit/proxy/db/test_daily_spend_date_timezone.py \
+            tests/unit/litellm_proxy_extras/test_litellm_proxy_extras_utils.py \
+            tests/unit/litellm_core_utils/test_streaming_chunk_builder_utils.py \
+            --tb=short -q --maxfail=10 -n 2 --reruns 2 --reruns-delay 1 --durations=20
 
   # ============ 3. 前端 build ============
   ui-build:
@@ -98,7 +130,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: ui/litellm-dashboard/package-lock.json
       - name: Install dependencies
@@ -123,7 +155,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: ui/litellm-dashboard/package-lock.json
       - name: Install dependencies
@@ -147,7 +179,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: ui/litellm-dashboard/package-lock.json
       - name: Install dependencies
@@ -171,7 +203,7 @@ jobs:
           python-version: "3.12"
       - uses: ./.github/actions/setup-uv-with-retries
         with:
-          version: "0.10.9"
+          version: "0.13.5"
       - name: Install backend deps
         run: ./.github/scripts/uv_sync_with_retries.sh --frozen --group ci --group proxy-dev --extra google --extra proxy --extra semantic-router
       - name: Generate Prisma client
@@ -180,7 +212,7 @@ jobs:
         run: uv run --no-sync prisma generate --schema litellm/proxy/schema.prisma
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: ui/litellm-dashboard/package-lock.json
       - name: Install dashboard deps

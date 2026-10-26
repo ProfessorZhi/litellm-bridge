@@ -1,14 +1,26 @@
+/* eslint-disable react-hooks/refs, no-restricted-syntax -- fork: monitor hook uses a direct fetch to the fork endpoint; refactor tracked */
 "use client";
 
 import useAuthorized from "@/app/(dashboard)/hooks/useAuthorized";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export interface ChannelBucket {
-  bucket: string;
+  /** 桶起点；已配置但窗口内无请求的模型为 null */
+  bucket: string | null;
   model_group: string;
   total_requests: number;
   success_requests: number;
+  failed_requests: number;
+  /** status 既非 success 也非 failure 的请求（防御未来新增状态） */
+  other_requests: number;
+  /** 能证明是调用方责任的失败 */
+  client_failures: number;
+  /** 其余全部失败，含未分类 */
+  channel_failures: number;
+  /** channel_failures 中能明确归因 provider 的子集 */
   upstream_failures: number;
+  transport_failures: number;
+  unclassified_failures: number;
   avg_latency_ms: number | null;
   avg_ttft_ms: number | null;
   p50_ms: number | null;
@@ -16,6 +28,7 @@ export interface ChannelBucket {
   total_tokens: number;
   prompt_tokens: number;
   completion_tokens: number;
+  /** 渠道可用率 = success / (success + channel_failures)，分母不是 total */
   health: number;
 }
 
@@ -27,8 +40,8 @@ export interface WindowOpt {
 
 // 每个时间窗对应的聚合粒度，保证状态条段数适中
 export const WINDOW_OPTIONS: WindowOpt[] = [
-  { label: "最近1小时", windowSec: 3600, bucketSec: 300 },   // 12段
-  { label: "最近1天", windowSec: 86400, bucketSec: 3600 },   // 24段
+  { label: "最近1小时", windowSec: 3600, bucketSec: 300 }, // 12段
+  { label: "最近1天", windowSec: 86400, bucketSec: 3600 }, // 24段
   { label: "最近7天", windowSec: 604800, bucketSec: 21600 }, // 28段
 ];
 
