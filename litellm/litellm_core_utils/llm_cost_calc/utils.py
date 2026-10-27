@@ -1725,7 +1725,7 @@ def _deepseek_pricing_for_breakdown(
     model: str,
     custom_llm_provider: str | None,
     api_base: str | None,
-    request_at: datetime.datetime | float | int | None,
+    request_at: datetime | float | int | None,
 ) -> DeepSeekPricing | None:
     """
     The DeepSeek rate card to break this request's cost down against, or None when
@@ -1781,7 +1781,7 @@ def get_token_type_cost_breakdown(
     current_time: datetime | None = None,
     custom_cost_per_token: CostPerToken | None = None,
     model_info: ModelInfo | None = None,
-    request_at: datetime.datetime | None = None,
+    request_at: datetime | None = None,
     api_base: str | None = None,
 ) -> TokenTypeCostBreakdown:
     """
