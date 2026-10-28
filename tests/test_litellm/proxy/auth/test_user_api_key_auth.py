@@ -6872,3 +6872,59 @@ class TestLitellmReceivedAtStamping:
 
         assert result == earlier
         assert request.state.litellm_received_at == earlier
+
+
+@pytest.mark.asyncio
+async def test_missing_api_key_raises_specialized_error():
+    """Only the master-key-set/absent-key branch may raise MissingAPIKeyError."""
+    from litellm.proxy.auth.missing_api_key import MissingAPIKeyError
+    from litellm.proxy.auth.user_api_key_auth import UserAPIKeyAuthExceptionHandler
+
+    mock_request = MagicMock()
+    mock_request.url.path = "/v1/chat/completions"
+    mock_request.method = "POST"
+    mock_request.headers = {}
+    mock_request.query_params = {}
+    mock_request.state = SimpleNamespace()
+
+    jwt_handler = MagicMock()
+    jwt_handler.is_jwt.return_value = False
+
+    captured = {}
+
+    async def _capture(e, **kwargs):
+        captured["error"] = e
+        raise ProxyException(
+            message="stop after capture",
+            type=ProxyErrorTypes.auth_error,
+            param=None,
+            code=401,
+        )
+
+    with (
+        patch("litellm.proxy.proxy_server.general_settings", {}),
+        patch("litellm.proxy.proxy_server.master_key", "sk-master"),
+        patch("litellm.proxy.proxy_server.prisma_client", None),
+        patch("litellm.proxy.proxy_server.user_api_key_cache", DualCache()),
+        patch("litellm.proxy.proxy_server.proxy_logging_obj", MagicMock()),
+        patch("litellm.proxy.proxy_server.jwt_handler", jwt_handler),
+        patch("litellm.proxy.proxy_server.user_custom_auth", None),
+        patch("litellm.proxy.auth.user_api_key_auth.enterprise_custom_auth", None),
+        patch.object(
+            UserAPIKeyAuthExceptionHandler,
+            "_handle_authentication_error",
+            side_effect=_capture,
+        ),
+    ):
+        with pytest.raises(ProxyException):
+            await _user_api_key_auth_builder(
+                request=mock_request,
+                api_key=None,
+                azure_api_key_header=None,
+                anthropic_api_key_header=None,
+                google_ai_studio_api_key_header=None,
+                azure_apim_header=None,
+                request_data={"model": "mock-chat"},
+            )
+
+    assert isinstance(captured["error"], MissingAPIKeyError)

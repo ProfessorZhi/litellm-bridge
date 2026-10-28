@@ -756,3 +756,209 @@ async def test_handle_authentication_error_traceback_only_for_unexpected_errors(
     records = [r for r in caplog.records if "user_api_key_auth(): Exception occured" in r.getMessage()]
     assert len(records) == 1
     assert (records[0].exc_info is not None) is expect_traceback
+
+
+def _missing_api_key_error():
+    from litellm.proxy.auth.missing_api_key import MissingAPIKeyError
+
+    return MissingAPIKeyError("No api key passed in.")
+
+
+async def _handle_missing_api_key(handler, error):
+    with (
+        patch(
+            "litellm.proxy.proxy_server.proxy_logging_obj.post_call_failure_hook",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("litellm.proxy.auth.auth_exception_handler.seed_request_identity"),
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {
+                "allow_requests_on_db_unavailable": False,
+                "suppress_missing_api_key_logs": True,
+                "count_missing_api_key_requests": False,
+            },
+        ),
+    ):
+        with pytest.raises(ProxyException) as exc_info:
+            await handler._handle_authentication_error(
+                error,
+                MagicMock(),
+                {"model": "mock-chat"},
+                "/v1/chat/completions",
+                None,
+                "sk-bad-key",
+            )
+    return exc_info.value
+
+
+@pytest.mark.asyncio
+async def test_missing_api_key_suppressed_keeps_401_without_console_error(caplog):
+    """Suppression may only silence the log, never change the auth contract."""
+    handler = UserAPIKeyAuthExceptionHandler()
+
+    verbose_proxy_logger.propagate = True
+    try:
+        with caplog.at_level("DEBUG", logger="LiteLLM Proxy"):
+            raised = await _handle_missing_api_key(handler, _missing_api_key_error())
+    finally:
+        verbose_proxy_logger.propagate = False
+
+    assert int(raised.code) == status.HTTP_401_UNAUTHORIZED
+    assert raised.message == "Authentication Error, No api key passed in."
+    assert not [record for record in caplog.records if "user_api_key_auth(): Exception occured" in record.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_missing_api_key_logged_when_suppression_disabled(caplog):
+    """The default must stay byte-for-byte the pre-change behaviour."""
+    handler = UserAPIKeyAuthExceptionHandler()
+
+    with (
+        patch(
+            "litellm.proxy.proxy_server.proxy_logging_obj.post_call_failure_hook",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("litellm.proxy.auth.auth_exception_handler.seed_request_identity"),
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {
+                "allow_requests_on_db_unavailable": False,
+                "suppress_missing_api_key_logs": False,
+            },
+        ),
+    ):
+        verbose_proxy_logger.propagate = True
+        try:
+            with caplog.at_level("ERROR", logger="LiteLLM Proxy"), pytest.raises(ProxyException):
+                await handler._handle_authentication_error(
+                    _missing_api_key_error(),
+                    MagicMock(),
+                    {"model": "mock-chat"},
+                    "/v1/chat/completions",
+                    None,
+                    "sk-bad-key",
+                )
+        finally:
+            verbose_proxy_logger.propagate = False
+
+    records = [r for r in caplog.records if "user_api_key_auth(): Exception occured" in r.getMessage()]
+    assert len(records) == 1
+
+
+@pytest.mark.asyncio
+async def test_suppression_does_not_hide_other_auth_errors(caplog):
+    """An unknown key is a real failure and must keep its error log."""
+    handler = UserAPIKeyAuthExceptionHandler()
+
+    with (
+        patch(
+            "litellm.proxy.proxy_server.proxy_logging_obj.post_call_failure_hook",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("litellm.proxy.auth.auth_exception_handler.seed_request_identity"),
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {
+                "allow_requests_on_db_unavailable": False,
+                "suppress_missing_api_key_logs": True,
+            },
+        ),
+    ):
+        verbose_proxy_logger.propagate = True
+        try:
+            with caplog.at_level("ERROR", logger="LiteLLM Proxy"), pytest.raises(ProxyException):
+                await handler._handle_authentication_error(
+                    ProxyException(
+                        message="Authentication Error, Invalid proxy server token passed.",
+                        type=ProxyErrorTypes.token_not_found_in_db,
+                        param="key",
+                        code=status.HTTP_401_UNAUTHORIZED,
+                    ),
+                    MagicMock(),
+                    {"model": "mock-chat"},
+                    "/v1/chat/completions",
+                    None,
+                    "sk-unknown",
+                )
+        finally:
+            verbose_proxy_logger.propagate = False
+
+    records = [r for r in caplog.records if "user_api_key_auth(): Exception occured" in r.getMessage()]
+    assert len(records) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_api_key_counted_once_when_enabled():
+    handler = UserAPIKeyAuthExceptionHandler()
+
+    with (
+        patch(
+            "litellm.proxy.proxy_server.proxy_logging_obj.post_call_failure_hook",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("litellm.proxy.auth.auth_exception_handler.seed_request_identity"),
+        patch(
+            "litellm.proxy.auth.auth_exception_handler.record_missing_api_key_request",
+            new_callable=AsyncMock,
+        ) as record,
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {
+                "allow_requests_on_db_unavailable": False,
+                "suppress_missing_api_key_logs": False,
+                "count_missing_api_key_requests": True,
+            },
+        ),
+    ):
+        with pytest.raises(ProxyException):
+            await handler._handle_authentication_error(
+                _missing_api_key_error(),
+                MagicMock(),
+                {"model": "mock-chat"},
+                "/v1/chat/completions",
+                None,
+                "sk-bad-key",
+            )
+
+    record.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_missing_api_key_not_counted_when_disabled():
+    handler = UserAPIKeyAuthExceptionHandler()
+
+    with (
+        patch(
+            "litellm.proxy.proxy_server.proxy_logging_obj.post_call_failure_hook",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("litellm.proxy.auth.auth_exception_handler.seed_request_identity"),
+        patch(
+            "litellm.proxy.auth.auth_exception_handler.record_missing_api_key_request",
+            new_callable=AsyncMock,
+        ) as record,
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {
+                "allow_requests_on_db_unavailable": False,
+                "count_missing_api_key_requests": False,
+            },
+        ),
+    ):
+        with pytest.raises(ProxyException):
+            await handler._handle_authentication_error(
+                _missing_api_key_error(),
+                MagicMock(),
+                {"model": "mock-chat"},
+                "/v1/chat/completions",
+                None,
+                "sk-bad-key",
+            )
+
+    record.assert_not_awaited()

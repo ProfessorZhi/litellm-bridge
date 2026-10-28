@@ -108,6 +108,7 @@ from litellm.proxy._types import (
     Member,
     UserAPIKeyAuth,
 )
+from litellm.proxy.auth.missing_api_key import MissingAPIKeyError, should_suppress_missing_api_key_logs
 from litellm.proxy.auth.route_checks import RouteChecks
 from litellm.proxy.common_utils.config_sync_pubsub import publish_config_param_change
 from litellm.proxy.common_utils.user_api_key_cache import UserApiKeyCache
@@ -620,6 +621,14 @@ class _CallbackCapabilities:
     # avoids the per-request ``get_custom_logger_compatible_class`` walk for
     # every string entry in ``litellm.callbacks``.
     resolved_callbacks: tuple[object, ...] = field(default_factory=tuple)
+
+
+def _suppressed_failure_callback_types(*, suppress_missing_api_key_logs: bool) -> tuple[type[CustomLogger], ...]:
+    if not suppress_missing_api_key_logs:
+        return ()
+    from litellm.proxy.hooks.proxy_track_cost_callback import _ProxyDBLogger
+
+    return (_ProxyDBLogger,)
 
 
 class ProxyLogging:
@@ -2517,10 +2526,16 @@ class ProxyLogging:
                                       Otherwise, returns None and the original exception is used.
         """
 
+        suppress_missing_api_key_logs: Final = (
+            isinstance(original_exception, MissingAPIKeyError) and should_suppress_missing_api_key_logs()
+        )
+
         ### ALERTING ###
         await self.update_request_status(litellm_call_id=request_data.get("litellm_call_id", ""), status="fail")
-        if AlertType.llm_exceptions in self.alert_types and not isinstance(
-            original_exception, (HTTPException, ProxyException)
+        if (
+            not suppress_missing_api_key_logs
+            and AlertType.llm_exceptions in self.alert_types
+            and not isinstance(original_exception, (HTTPException, ProxyException))
         ):
             """
             Just alert on LLM API exceptions. Do not alert on user errors
@@ -2547,7 +2562,7 @@ class ProxyLogging:
         request_data.pop("standard_logging_object", None)
 
         ### LOGGING ###
-        if self._is_proxy_only_llm_api_error(
+        if not suppress_missing_api_key_logs and self._is_proxy_only_llm_api_error(
             original_exception=original_exception,
             error_type=error_type,
             route=user_api_key_dict.request_route,
@@ -2567,6 +2582,10 @@ class ProxyLogging:
         # Track the first HTTPException returned or raised by any callback
         transformed_exception: HTTPException | None = None
 
+        suppressed_callback_types: Final = _suppressed_failure_callback_types(
+            suppress_missing_api_key_logs=suppress_missing_api_key_logs
+        )
+
         for callback in litellm.callbacks:
             try:
                 _callback: CustomLogger | None = None
@@ -2577,6 +2596,8 @@ class ProxyLogging:
                 else:
                     _callback = callback
                 if _callback is not None and isinstance(_callback, CustomLogger):
+                    if isinstance(_callback, suppressed_callback_types):
+                        continue
                     try:
                         hook_result = await _callback.async_post_call_failure_hook(
                             request_data=request_data,

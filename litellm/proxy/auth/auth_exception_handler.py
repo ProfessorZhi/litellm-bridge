@@ -19,6 +19,12 @@ from litellm.proxy._types import (
     UserAPIKeyAuth,
 )
 from litellm.proxy.auth.auth_utils import _get_request_ip_address
+from litellm.proxy.auth.missing_api_key import (
+    MissingAPIKeyError,
+    record_missing_api_key_request,
+    should_count_missing_api_key_requests,
+    should_suppress_missing_api_key_logs,
+)
 from litellm.proxy.db.exception_handler import PrismaDBExceptionHandler
 from litellm.types.services import ServiceTypes
 
@@ -106,6 +112,10 @@ class UserAPIKeyAuthExceptionHandler:
             )
         else:
             # raise the exception to the caller
+            is_missing_api_key: Final = isinstance(e, MissingAPIKeyError)
+            if is_missing_api_key and should_count_missing_api_key_requests():
+                await record_missing_api_key_request()
+            suppress_missing_api_key_logs: Final = is_missing_api_key and should_suppress_missing_api_key_logs()
             requester_ip: Final = _get_request_ip_address(
                 request=request,
                 use_x_forwarded_for=general_settings.get("use_x_forwarded_for") is True,
@@ -115,12 +125,13 @@ class UserAPIKeyAuthExceptionHandler:
                 if is_expected_client_error(e) and not litellm.log_client_error_tracebacks
                 else verbose_proxy_logger.exception
             )
-            log_fn(
-                "litellm.proxy.proxy_server.user_api_key_auth(): Exception occured - %s\nRequester IP Address:%s",
-                e,
-                requester_ip,
-                extra={"requester_ip": requester_ip},
-            )
+            if not suppress_missing_api_key_logs:
+                log_fn(
+                    "litellm.proxy.proxy_server.user_api_key_auth(): Exception occured - %s\nRequester IP Address:%s",
+                    e,
+                    requester_ip,
+                    extra={"requester_ip": requester_ip},
+                )
 
             # Log this exception to OTEL, Datadog etc. Reuse the identity resolved
             # before the failure (team alias/id, metadata, user) so the failed span

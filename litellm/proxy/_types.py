@@ -2379,6 +2379,21 @@ class ConfigGeneralSettings(LiteLLMPydanticObjectBase):
     """
 
     completion_model: str | None = Field(None, description="proxy level default model for all chat completion calls")
+    suppress_missing_api_key_logs: bool | None = Field(
+        None,
+        description=(
+            "When true, a request rejected because it carried no API Key is not written to "
+            "LiteLLM_SpendLogs and produces no per-request error log. The 401 response is unchanged."
+        ),
+    )
+    count_missing_api_key_requests: bool | None = Field(
+        None,
+        description=(
+            "When true, count requests rejected because they carried no API Key. Exposed as the "
+            "litellm_missing_api_key_requests Prometheus counter and the Redis key "
+            "litellm:auth:missing_api_key:total."
+        ),
+    )
     plugins: list[PluginConfig] | None = Field(
         None, description="external services registered as embeddable UI plugins"
     )
