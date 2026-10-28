@@ -6,6 +6,7 @@ from litellm.llms.anthropic.pass_through.messages.transformation import (
 )
 from litellm.llms.deepseek.messages.transformation import (
     DeepSeekAnthropicMessagesConfig,
+    DeepSeekCompatAnthropicMessagesConfig,
 )
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
@@ -972,3 +973,113 @@ def test_a_message_that_is_not_an_object_is_forwarded_untouched():
 
     assert messages[1] == "not-a-message"
     assert tools == []
+
+
+# Anthropic provider deployments aimed at DeepSeek keep their own auth and URL while
+# opting into the SAME DeepSeek tool-block conversion; real Anthropic stays untouched.
+
+
+def _transform_anthropic_provider_deepseek_compat(messages, tools=None, *, stream=False):
+    config = DeepSeekCompatAnthropicMessagesConfig()
+    params = {"max_tokens": 100}
+    if tools is not None:
+        params["tools"] = tools
+    if stream:
+        params["stream"] = True
+    return config.transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        anthropic_messages_optional_request_params=params,
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_info", "enabled"),
+    [
+        ("anthropic", {"anthropic_messages_compatibility": "deepseek"}, True),
+        ("anthropic", {}, False),
+        ("anthropic", {"anthropic_messages_compatibility": "anthropic"}, False),
+        ("deepseek", {"anthropic_messages_compatibility": "deepseek"}, False),
+        ("anthropic", "invalid", False),
+        (None, {"anthropic_messages_compatibility": "deepseek"}, False),
+    ],
+)
+def test_deepseek_anthropic_compatibility_requires_explicit_deployment_opt_in(
+    provider, model_info, enabled
+):
+    from litellm.llms.anthropic.pass_through.messages.handler import _uses_deepseek_wire_compatibility
+
+    assert _uses_deepseek_wire_compatibility(provider, model_info) is enabled
+
+
+def test_anthropic_provider_compat_preserves_generic_routing_and_converts_inline_tool_definition():
+    config = DeepSeekCompatAnthropicMessagesConfig()
+    assert config.custom_llm_provider == "anthropic"
+    assert config.get_complete_url(
+        api_base="https://api.deepseek.com/anthropic",
+        api_key=None,
+        model="deepseek-v4-pro",
+        optional_params={},
+        litellm_params={},
+    ) == "https://api.deepseek.com/anthropic/v1/messages"
+
+    messages = [_addition(_body())]
+    request = _transform_anthropic_provider_deepseek_compat(messages, tools=[])
+
+    assert request["messages"][0]["content"][0] == {
+        "type": "tool_addition",
+        "tool": {"type": "tool_reference", "name": _TOOL},
+    }
+    assert request["tools"] == [_body()]
+
+    # A real Anthropic deployment must retain its original wire representation.
+    default = AnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="claude-test",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 100, "tools": []},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+    assert default["messages"] == messages
+    assert default["tools"] == []
+
+
+def test_anthropic_provider_compat_reuses_deepseek_withdrawal_semantics():
+    messages = [
+        {"role": "user", "content": "run tool"},
+        _addition(_body()),
+        _withdrawal(),
+    ]
+    expected = _transform(messages, tools=[])
+    actual = _transform_anthropic_provider_deepseek_compat(messages, tools=[])
+    assert actual["messages"] == expected["messages"]
+    assert actual["tools"] == expected["tools"]
+
+
+def test_anthropic_provider_compat_refuses_unsupported_bare_tool_definition_locally():
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "tool_definition", "definition": _body()}],
+        }
+    ]
+    with pytest.raises(litellm.BadRequestError, match="cannot convert"):
+        _transform_anthropic_provider_deepseek_compat(messages, tools=[])
+
+
+def test_anthropic_provider_compat_keeps_normal_messages_unchanged():
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+    ]
+    assert _transform_anthropic_provider_deepseek_compat(messages)["messages"] == messages
+
+
+def test_anthropic_provider_compat_agrees_with_deepseek_provider_for_streaming():
+    messages = [_addition(_body())]
+    regular = _transform_anthropic_provider_deepseek_compat(messages, tools=[])
+    stream = _transform_anthropic_provider_deepseek_compat(messages, tools=[], stream=True)
+    assert stream["messages"] == regular["messages"]
+    assert stream["tools"] == regular["tools"]
