@@ -479,6 +479,17 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             )
         return converted, cls._final_tools(tools, ledger)
 
+    @classmethod
+    def _rewrite_deepseek_tool_blocks(cls, request: dict, model: str) -> dict:
+        """One DeepSeek wire conversion shared by native DeepSeek and opt-in Anthropic routing."""
+        converted_messages, converted_tools = cls._downgrade_inline_tool_definitions(
+            request["messages"], request.get("tools") or [], model
+        )
+        request["messages"] = converted_messages
+        if converted_tools or "tools" in request:
+            request["tools"] = cls._sanitize_tools_for_deepseek(converted_tools)
+        return request
+
     def transform_anthropic_messages_request(
         self,
         model: str,
@@ -495,12 +506,28 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
             litellm_params=litellm_params,
             headers=headers,
         )
-        converted_messages, converted_tools = self._downgrade_inline_tool_definitions(
-            anthropic_messages_request["messages"],
-            anthropic_messages_request.get("tools") or [],
-            model,
+        return self._rewrite_deepseek_tool_blocks(anthropic_messages_request, model)
+
+
+class DeepSeekCompatAnthropicMessagesConfig(AnthropicMessagesConfig):
+    """Use DeepSeek's tool-block wire compatibility without changing Anthropic routing or auth."""
+
+    def transform_anthropic_messages_request(
+        self,
+        model: str,
+        messages: list[dict],
+        anthropic_messages_optional_request_params: dict,
+        litellm_params: GenericLiteLLMParams,
+        headers: dict,
+    ) -> dict:
+        DeepSeekAnthropicMessagesConfig._tools_or_raise(
+            anthropic_messages_optional_request_params.get("tools"), model
         )
-        anthropic_messages_request["messages"] = converted_messages
-        if converted_tools or "tools" in anthropic_messages_request:
-            anthropic_messages_request["tools"] = self._sanitize_tools_for_deepseek(converted_tools)
-        return anthropic_messages_request
+        request: Final = super().transform_anthropic_messages_request(
+            model=model,
+            messages=messages,
+            anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
+            litellm_params=litellm_params,
+            headers=headers,
+        )
+        return DeepSeekAnthropicMessagesConfig._rewrite_deepseek_tool_blocks(request, model)
