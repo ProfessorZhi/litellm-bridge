@@ -71,6 +71,32 @@ class MockRecordingGuardrail(CustomGuardrail):
         return inputs
 
 
+class MockToolRecordingGuardrail(CustomGuardrail):
+    """Record the tools it was handed, optionally dropping one by name."""
+
+    def __init__(self, drop_tool: Optional[str] = None):
+        super().__init__(guardrail_name="tool-recording")
+        self.inputs: Optional[GenericGuardrailAPIInputs] = None
+        self.drop_tool = drop_tool
+
+    async def apply_guardrail(
+        self,
+        inputs: GenericGuardrailAPIInputs,
+        request_data: dict,
+        input_type: Literal["request", "response"],
+        logging_obj: Optional[Any] = None,
+    ) -> GenericGuardrailAPIInputs:
+        self.inputs = inputs
+        tools = inputs.get("tools")
+        if tools is not None and self.drop_tool is not None:
+            inputs["tools"] = [
+                tool
+                for tool in tools
+                if not (isinstance(tool, dict) and tool.get("function", {}).get("name") == self.drop_tool)
+            ]
+        return inputs
+
+
 class MockMaskingGuardrail(CustomGuardrail):
     """Capture request inputs and mask one known prohibited value."""
 
@@ -260,12 +286,42 @@ class TestAnthropicMessagesHandlerStreamingOutputProcessing:
     @staticmethod
     def _ended_sse_chunks() -> list:
         events = [
-            ("message_start", {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-4-5", "content": [], "stop_reason": None, "usage": {"input_tokens": 1, "output_tokens": 0}}}),
-            ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
-            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello "}}),
-            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "world"}}),
+            (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-sonnet-4-5",
+                        "content": [],
+                        "stop_reason": None,
+                        "usage": {"input_tokens": 1, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
+                "content_block_start",
+                {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            ),
+            (
+                "content_block_delta",
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hello "}},
+            ),
+            (
+                "content_block_delta",
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "world"}},
+            ),
             ("content_block_stop", {"type": "content_block_stop", "index": 0}),
-            ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 2}}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                    "usage": {"output_tokens": 2},
+                },
+            ),
             ("message_stop", {"type": "message_stop"}),
         ]
         return [f"event: {name}\ndata: {json.dumps(payload)}\n\n".encode() for name, payload in events]
@@ -311,13 +367,58 @@ class TestAnthropicMessagesHandlerStreamingOutputProcessing:
     @staticmethod
     def _ended_tool_use_sse_chunks() -> list:
         events = [
-            ("message_start", {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-4-5", "content": [], "stop_reason": None, "usage": {"input_tokens": 1, "output_tokens": 0}}}),
-            ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "lookup_fruit", "input": {}}}),
-            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": ""}}),
-            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"fruit": "persim'}}),
-            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": 'mon"}'}}),
+            (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-sonnet-4-5",
+                        "content": [],
+                        "stop_reason": None,
+                        "usage": {"input_tokens": 1, "output_tokens": 0},
+                    },
+                },
+            ),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "tool_use", "id": "toolu_1", "name": "lookup_fruit", "input": {}},
+                },
+            ),
+            (
+                "content_block_delta",
+                {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": ""}},
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"fruit": "persim'},
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": 'mon"}'},
+                },
+            ),
             ("content_block_stop", {"type": "content_block_stop", "index": 0}),
-            ("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None}, "usage": {"output_tokens": 2}}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                    "usage": {"output_tokens": 2},
+                },
+            ),
             ("message_stop", {"type": "message_stop"}),
         ]
         return [f"event: {name}\ndata: {json.dumps(payload)}\n\n".encode() for name, payload in events]
@@ -338,7 +439,8 @@ class TestAnthropicMessagesHandlerStreamingOutputProcessing:
             json.loads(line[len("data:") :].strip())["delta"]["partial_json"]
             for chunk in chunks
             for line in chunk.decode().split("\n")
-            if line.startswith("data:") and json.loads(line[len("data:") :].strip()).get("type") == "content_block_delta"
+            if line.startswith("data:")
+            and json.loads(line[len("data:") :].strip()).get("type") == "content_block_delta"
         ]
 
     @pytest.mark.asyncio
@@ -403,8 +505,22 @@ class TestAnthropicMessagesHandlerStreamingOutputProcessing:
 
         handler = AnthropicMessagesHandler()
         server_tool_use = [
-            ("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}}),
-            ("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"query": "fruit"}'}}),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}},
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": '{"query": "fruit"}'},
+                },
+            ),
             ("content_block_stop", {"type": "content_block_stop", "index": 0}),
         ]
         tool_use = self._ended_tool_use_sse_chunks()
@@ -545,6 +661,74 @@ class TestAnthropicMessagesHandlerInputProcessing:
 
         assert {"googleMaps": {"enable_widget": True}} in data["tools"]
         assert [tool["name"] for tool in data["tools"] if "name" in tool] == ["get_weather"]
+
+    @pytest.mark.asyncio
+    async def test_inline_tool_definition_is_visible_to_a_generic_guardrail(self):
+        handler = AnthropicMessagesHandler()
+        guardrail = MockToolRecordingGuardrail()
+        data = {
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "inline_tool",
+                                    "description": "inline",
+                                    "input_schema": {
+                                        "type": "object",
+                                        "properties": {"q": {"type": "string"}},
+                                    },
+                                },
+                            },
+                        }
+                    ],
+                },
+            ],
+        }
+
+        await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
+
+        assert guardrail.inputs is not None
+        tools = guardrail.inputs["tools"]
+        inline = next(tool for tool in tools if tool["function"]["name"] == "inline_tool")
+        assert inline["function"]["parameters"]["properties"]["q"]["type"] == "string"
+        assert all(tool.get("name") != "inline_tool" for tool in data.get("tools", []))
+
+    @pytest.mark.asyncio
+    async def test_a_generic_guardrail_can_drop_an_inline_tool_definition(self):
+        handler = AnthropicMessagesHandler()
+        guardrail = MockToolRecordingGuardrail(drop_tool="inline_tool")
+        data = {
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "inline_tool",
+                                    "input_schema": {"type": "object"},
+                                },
+                            },
+                        }
+                    ],
+                },
+            ],
+        }
+
+        await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
+
+        assert data["messages"][1]["content"] == []
 
     @pytest.mark.asyncio
     async def test_midturn_system_correction_is_guardrailed_when_top_level_system_is_skipped(
@@ -2407,9 +2591,7 @@ class TestStructuredWriteBackKeepsToolResults:
         ],
         ids=["tool_reference", "empty"],
     )
-    async def test_tool_result_stays_right_after_its_tool_use(
-        self, tool_result_content, expected_written_back_content
-    ):
+    async def test_tool_result_stays_right_after_its_tool_use(self, tool_result_content, expected_written_back_content):
         handler = AnthropicMessagesHandler()
         data = {"model": "claude-fable-5", "messages": self._claude_code_tool_search_turns(tool_result_content)}
 

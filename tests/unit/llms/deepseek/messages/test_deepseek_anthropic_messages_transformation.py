@@ -998,15 +998,9 @@ def _compat_transform(messages, tools=None):
 
 
 def test_compat_opt_in_is_explicit_and_provider_scoped():
-    assert _uses_deepseek_wire_compatibility(
-        "anthropic", {"anthropic_messages_compatibility": "deepseek"}
-    )
-    assert not _uses_deepseek_wire_compatibility(
-        "deepseek", {"anthropic_messages_compatibility": "deepseek"}
-    )
-    assert not _uses_deepseek_wire_compatibility(
-        "anthropic", {"anthropic_messages_compatibility": "other"}
-    )
+    assert _uses_deepseek_wire_compatibility("anthropic", {"anthropic_messages_compatibility": "deepseek"})
+    assert not _uses_deepseek_wire_compatibility("deepseek", {"anthropic_messages_compatibility": "deepseek"})
+    assert not _uses_deepseek_wire_compatibility("anthropic", {"anthropic_messages_compatibility": "other"})
     assert not _uses_deepseek_wire_compatibility("anthropic", None)
 
 
@@ -1066,3 +1060,11 @@ def test_compat_config_reuses_deepseek_tool_sanitization():
 
     local = next(tool for tool in request["tools"] if tool.get("name") == "local_tool")
     assert "type" not in local
+
+
+def test_compat_config_refuses_a_non_list_tools_container():
+    with pytest.raises(litellm.BadRequestError) as excinfo:
+        _compat_transform([{"role": "user", "content": "hi"}], tools=5)
+
+    assert excinfo.value.status_code == 400
+    assert "tools to be a list" in str(excinfo.value)

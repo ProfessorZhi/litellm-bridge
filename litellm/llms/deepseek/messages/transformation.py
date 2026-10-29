@@ -157,7 +157,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return node if node[key] is value else {**node, key: value}
 
     @staticmethod
-    def _tools_or_raise(tools: Any, model: str) -> None:
+    def tools_or_raise(tools: object, model: str) -> None:
         """Reject a ``tools`` value that is neither absent nor a list of declarations.
 
         Checked before ``super()`` too: the parent walks ``tools`` for the advisor tool type,
@@ -426,7 +426,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
 
     @classmethod
     def _downgrade_inline_tool_definitions(
-        cls, messages: list[dict], tools: list[Any], model: str = "deepseek"
+        cls, messages: list[object], tools: list[object], model: str = "deepseek"
     ) -> tuple[list[object], list[object]]:
         """Move inline tool definitions into tools[] and reference them by name.
 
@@ -434,7 +434,7 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         definition reaches it as a 422 the client cannot act on. A block that cannot be converted
         safely is refused rather than dropped without a word.
         """
-        cls._tools_or_raise(tools, model)
+        cls.tools_or_raise(tools, model)
         misplaced: Final = next(
             (
                 i
@@ -480,33 +480,43 @@ class DeepSeekAnthropicMessagesConfig(AnthropicMessagesConfig):
         return converted, cls._final_tools(tools, ledger)
 
     @classmethod
-    def _rewrite_deepseek_tool_blocks(cls, request: dict, model: str) -> dict:
+    def rewrite_deepseek_tool_blocks(
+        cls, request: dict[str, object], model: str
+    ) -> dict[str, object]:  # mutable-ok: provider request body is a JSON object
         """One DeepSeek wire conversion shared by native DeepSeek and opt-in Anthropic routing."""
+        raw_messages: Final = request.get("messages")
+        raw_tools: Final = request.get("tools")
         converted_messages, converted_tools = cls._downgrade_inline_tool_definitions(
-            request["messages"], request.get("tools") or [], model
+            raw_messages if isinstance(raw_messages, list) else [],  # pyright: ignore[reportUnknownArgumentType]  # base transform returns bare JSON arrays
+            raw_tools if isinstance(raw_tools, list) else [],  # pyright: ignore[reportUnknownArgumentType]  # same bare JSON request
+            model,
         )
-        request["messages"] = converted_messages
+        request["messages"] = converted_messages  # rebind-ok: the provider request body is rewritten in place
         if converted_tools or "tools" in request:
-            request["tools"] = cls._sanitize_tools_for_deepseek(converted_tools)
+            request["tools"] = cls._sanitize_tools_for_deepseek(  # rebind-ok: same request body
+                converted_tools
+            )
         return request
 
     def transform_anthropic_messages_request(
         self,
         model: str,
-        messages: list[dict],
-        anthropic_messages_optional_request_params: dict,
+        messages: list[dict[str, object]],  # mutable-ok: mirrors the base transform signature
+        anthropic_messages_optional_request_params: dict[  # mutable-ok: mirrors the base transform signature
+            str, object
+        ],
         litellm_params: GenericLiteLLMParams,
-        headers: dict,
-    ) -> dict:
-        self._tools_or_raise(anthropic_messages_optional_request_params.get("tools"), model)
-        anthropic_messages_request: Final = super().transform_anthropic_messages_request(
+        headers: dict[str, object],  # mutable-ok: mirrors the base transform signature
+    ) -> dict[str, object]:  # mutable-ok: mirrors the base transform signature
+        self.tools_or_raise(anthropic_messages_optional_request_params.get("tools"), model)
+        anthropic_messages_request: Final[dict[str, object]] = super().transform_anthropic_messages_request(  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]  # base transform returns a bare request dict
             model=model,
             messages=messages,
             anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
             litellm_params=litellm_params,
             headers=headers,
         )
-        return self._rewrite_deepseek_tool_blocks(anthropic_messages_request, model)
+        return self.rewrite_deepseek_tool_blocks(anthropic_messages_request, model)
 
 
 class DeepSeekCompatAnthropicMessagesConfig(AnthropicMessagesConfig):
@@ -515,16 +525,19 @@ class DeepSeekCompatAnthropicMessagesConfig(AnthropicMessagesConfig):
     def transform_anthropic_messages_request(
         self,
         model: str,
-        messages: list[dict],
-        anthropic_messages_optional_request_params: dict,
+        messages: list[dict[str, object]],  # mutable-ok: mirrors the base transform signature
+        anthropic_messages_optional_request_params: dict[  # mutable-ok: mirrors the base transform signature
+            str, object
+        ],
         litellm_params: GenericLiteLLMParams,
-        headers: dict,
-    ) -> dict:
-        request: Final = super().transform_anthropic_messages_request(
+        headers: dict[str, object],  # mutable-ok: mirrors the base transform signature
+    ) -> dict[str, object]:  # mutable-ok: mirrors the base transform signature
+        DeepSeekAnthropicMessagesConfig.tools_or_raise(anthropic_messages_optional_request_params.get("tools"), model)
+        request: Final[dict[str, object]] = super().transform_anthropic_messages_request(  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]  # base transform returns a bare request dict
             model=model,
             messages=messages,
             anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
             litellm_params=litellm_params,
             headers=headers,
         )
-        return DeepSeekAnthropicMessagesConfig._rewrite_deepseek_tool_blocks(request, model)
+        return DeepSeekAnthropicMessagesConfig.rewrite_deepseek_tool_blocks(request, model)

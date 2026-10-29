@@ -1,121 +1,125 @@
-"""Resolve mid-conversation tool changes into the tool set a request can actually use.
+"""Resolve the tool names a request can make the provider act on.
 
-Authorization and tool-permission guardrails must see a tool a request adds inline,
-otherwise a key restricted from that tool can still get the model to call it. The
-resolver is name-only on purpose: the provider transform keeps the validating
-ledger, while auth needs the same add/remove/re-add outcome without raising on
-schema details it does not own.
+Authorization must see every tool a request declares, including one added inline in a
+system message. A mid-conversation ``tool_removal`` is not subtracted: the
+chat-completions and Responses bridges drop the removal block but still forward
+``tools[]``, so trusting the removal would hide a tool the provider can still call.
+A removal-only request therefore still has to satisfy the allowlist.
 """
 
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
-from functools import reduce
+from itertools import chain
 from typing import Final
+
+from pydantic import TypeAdapter, ValidationError
 
 from litellm.llms.base_llm.guardrail_translation.utils import anthropic_tool_names
 
-
-@dataclass(frozen=True, slots=True)
-class AnthropicToolChanges:
-    effective: tuple[str, ...]
-    added: tuple[str, ...]
-    removed: frozenset[str]
+_OBJECT_MAPPING: Final = TypeAdapter(Mapping[str, object])
+_OBJECT_LIST: Final = TypeAdapter(list[object])
 
 
-@dataclass(frozen=True, slots=True)
-class _ToolChangeState:
-    added: tuple[str, ...] = ()
-    removed: frozenset[str] = frozenset()
+def object_mapping(value: object) -> Mapping[str, object] | None:
+    """A JSON object as a typed read-only mapping, or None when ``value`` is not one."""
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        return _OBJECT_MAPPING.validate_python(value)
+    except ValidationError:
+        return None
+
+
+def object_list(value: object) -> tuple[object, ...]:
+    """A JSON array as a tuple, or an empty tuple when ``value`` is not one."""
+    if not isinstance(value, list):
+        return ()
+    try:
+        return tuple(_OBJECT_LIST.validate_python(value))
+    except ValidationError:
+        return ()
 
 
 def _dedupe(names: Iterable[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
-def _definition_name(block: Mapping[str, object]) -> str | None:
-    for key in ("name", "tool_name"):
-        value: Final = block.get(key)
-        if isinstance(value, str) and value:
-            return value
-    definition: Final = block.get("definition")
-    if isinstance(definition, Mapping):
-        for key in ("name", "tool_name"):
-            value: Final = definition.get(key)
-            if isinstance(value, str) and value:
-                return value
-    return None
+def _definition_name(tool: Mapping[str, object]) -> str | None:
+    definition: Final = object_mapping(tool.get("definition"))
+    if definition is None:
+        return None
+    name: Final = definition.get("name")
+    return name if isinstance(name, str) and name else None
 
 
 def _reference_name(tool: Mapping[str, object]) -> str | None:
-    for key in ("name", "tool_name"):
-        value: Final = tool.get(key)
-        if isinstance(value, str) and value:
-            return value
+    name: Final = tool.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def inline_tool_addition_name(block: object) -> str | None:
+    """The name an inline ``tool_addition`` declares, or None when ``block`` is not one."""
+    fields: Final = object_mapping(block)
+    if fields is None or fields.get("type") != "tool_addition":
+        return None
+    tool: Final = object_mapping(fields.get("tool"))
+    if tool is None:
+        return None
+    tool_type: Final = tool.get("type")
+    if tool_type == "tool_definition":
+        return _definition_name(tool)
+    if tool_type == "tool_reference":
+        return _reference_name(tool)
     return None
 
 
-def _event(role: object, block: Mapping[str, object]) -> tuple[str, str] | None:
-    kind: Final = block.get("type")
-    if kind == "tool_addition" and role == "system":
-        tool: Final = block.get("tool")
-        if not isinstance(tool, Mapping):
-            return None
-        name: Final = (
-            _definition_name(tool)
-            if tool.get("type") == "tool_definition"
-            else _reference_name(tool)
-            if tool.get("type") == "tool_reference"
-            else None
-        )
-        return ("add", name) if name is not None else None
-    if kind == "tool_removal" and role == "system":
-        tool: Final = block.get("tool")
-        if not isinstance(tool, Mapping) or tool.get("type") != "tool_reference":
-            return None
-        name: Final = _reference_name(tool)
-        return ("remove", name) if name is not None else None
-    if kind == "tool_definition":
-        name: Final = _definition_name(block)
-        return ("add", name) if name is not None else None
-    return None
+def _system_content_blocks(messages: object) -> Iterator[object]:
+    for raw_message in object_list(messages):
+        message = object_mapping(raw_message)
+        if message is None or message.get("role") != "system":
+            continue
+        yield from object_list(message.get("content"))
 
 
-def _iter_events(messages: object) -> Iterator[tuple[str, str]]:
-    if not isinstance(messages, list):
+def _iter_added_names(messages: object) -> Iterator[str]:
+    for block in _system_content_blocks(messages):
+        name = inline_tool_addition_name(block)
+        if name is not None:
+            yield name
+
+
+def _definition_from_addition(block: object) -> Iterator[Mapping[str, object]]:
+    fields: Final = object_mapping(block)
+    if fields is None or fields.get("type") != "tool_addition":
         return
-    for message in messages:
-        if not isinstance(message, Mapping):
-            continue
-        content: Final = message.get("content")
-        if not isinstance(content, list):
-            continue
-        role: Final = message.get("role")
-        for block in content:
-            if isinstance(block, Mapping):
-                event: Final = _event(role, block)
-                if event is not None:
-                    yield event
+    tool: Final = object_mapping(fields.get("tool"))
+    if tool is None or tool.get("type") != "tool_definition":
+        return
+    definition: Final = object_mapping(tool.get("definition"))
+    if definition is not None and _definition_name(tool) is not None:
+        yield definition
 
 
-def _apply_event(state: _ToolChangeState, event: tuple[str, str]) -> _ToolChangeState:
-    kind, name = event
-    if kind == "add":
-        return _ToolChangeState(added=(*state.added, name), removed=state.removed - {name})
-    return _ToolChangeState(added=state.added, removed=state.removed | {name})
-
-
-def resolve_anthropic_tool_changes(data: Mapping[str, object]) -> AnthropicToolChanges:
-    """The effective tool set after inline additions, removals and re-adds.
-
-    Only protocol positions are read: a message's own ``content`` list. A
-    ``tool_definition`` inside ``tool_use.input`` or a schema property is user data
-    and is never treated as a declaration.
-    """
-    tools: Final = data.get("tools")
-    base: Final = (
-        _dedupe(name for tool in tools for name in anthropic_tool_names(tool)) if isinstance(tools, list) else ()
+def inline_tool_definitions(data: Mapping[str, object]) -> tuple[Mapping[str, object], ...]:
+    """Definitions carried by inline additions, for guardrails that inspect tool schemas."""
+    return tuple(
+        chain.from_iterable(_definition_from_addition(block) for block in _system_content_blocks(data.get("messages")))
     )
-    state: Final = reduce(_apply_event, _iter_events(data.get("messages")), _ToolChangeState())
-    added: Final = _dedupe(state.added)
-    effective: Final = _dedupe(name for name in (*base, *added) if name not in state.removed)
-    return AnthropicToolChanges(effective=effective, added=added, removed=state.removed)
+
+
+def strip_inline_tool_additions(message: object, names: frozenset[str]) -> object:
+    """Drop the inline additions that declare one of ``names``; other blocks are untouched."""
+    fields: Final = object_mapping(message)
+    if fields is None or fields.get("role") != "system":
+        return message
+    content: Final = object_list(fields.get("content"))
+    kept: Final = [block for block in content if inline_tool_addition_name(block) not in names]
+    if len(kept) == len(content):
+        return message
+    return {**fields, "content": kept}
+
+
+def resolve_anthropic_tool_names(data: Mapping[str, object]) -> tuple[str, ...]:
+    """Every tool name authorization must check for this request."""
+    tools: Final = object_list(data.get("tools"))
+    base: Final = _dedupe(chain.from_iterable(anthropic_tool_names(tool) for tool in tools))
+    return _dedupe((*base, *_iter_added_names(data.get("messages"))))

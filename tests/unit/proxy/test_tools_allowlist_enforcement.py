@@ -58,9 +58,7 @@ class TestExtractRequestToolNames:
                 {"type": "function", "name": "get_current_weather", "description": "x"},
             ]
         }
-        assert extract_request_tool_names("/v1/responses", data) == [
-            "get_current_weather"
-        ]
+        assert extract_request_tool_names("/v1/responses", data) == ["get_current_weather"]
 
     def test_openai_responses_mcp_tools(self):
         data = {
@@ -129,9 +127,7 @@ class TestExtractRequestToolNames:
                 },
             ]
         }
-        assert extract_request_tool_names("/generate_content", data) == [
-            "schedule_meeting"
-        ]
+        assert extract_request_tool_names("/generate_content", data) == ["schedule_meeting"]
 
     def test_mcp_call_tool_name(self):
         data = {"name": "my_tool", "arguments": {}}
@@ -276,11 +272,12 @@ class TestCheckToolsAllowlist:
 
 
 class TestAnthropicInlineToolChanges:
-    """Mid-conversation tool additions/removals must be visible to authorization.
+    """Mid-conversation tool additions must be visible to authorization.
 
     A tool a request adds inline is usable by the model, so it must be checked
-    against the key/team allowlist exactly like a tools[] entry. A withdrawn tool
-    is not usable and must not make a removal-only request fail the allowlist.
+    against the key/team allowlist exactly like a tools[] entry. A removal is not
+    subtracted: the chat-completions and Responses bridges drop the removal block
+    but keep forwarding tools[], so only the additions can be trusted.
     """
 
     def test_inline_tool_addition_is_visible(self):
@@ -343,7 +340,7 @@ class TestAnthropicInlineToolChanges:
         assert exc_info.value.type == ProxyErrorTypes.tool_access_denied
         assert "dynamic_tool" in str(exc_info.value.message)
 
-    def test_bare_tool_definition_is_visible(self):
+    def test_bare_tool_definition_is_user_data(self):
         body = {
             "messages": [
                 {
@@ -360,15 +357,13 @@ class TestAnthropicInlineToolChanges:
                 }
             ]
         }
-        assert extract_request_tool_names("/v1/messages", body) == ["bare_tool"]
+        assert extract_request_tool_names("/v1/messages", body) == []
 
-    @pytest.mark.asyncio
-    async def test_bare_tool_definition_not_in_allowlist_is_denied(self):
-        token = _token(metadata={"allowed_tools": ["other_tool"]})
+    def test_bare_tool_definition_in_a_system_message_is_still_user_data(self):
         body = {
             "messages": [
                 {
-                    "role": "user",
+                    "role": "system",
                     "content": [
                         {
                             "type": "tool_definition",
@@ -380,6 +375,59 @@ class TestAnthropicInlineToolChanges:
                     ],
                 }
             ]
+        }
+        assert extract_request_tool_names("/v1/messages", body) == []
+
+    def test_tool_definition_uses_definition_name_only(self):
+        body = {
+            "tools": [{"name": "allowed_tool"}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "name": "allowed_tool",
+                                "definition": {
+                                    "name": "secret_tool",
+                                    "input_schema": {"type": "object"},
+                                },
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        assert extract_request_tool_names("/v1/messages", body) == [
+            "allowed_tool",
+            "secret_tool",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_decoy_flat_name_cannot_smuggle_definition_name_past_allowlist(self):
+        token = _token(metadata={"allowed_tools": ["allowed_tool"]})
+        body = {
+            "tools": [{"name": "allowed_tool"}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "name": "allowed_tool",
+                                "definition": {
+                                    "name": "secret_tool",
+                                    "input_schema": {"type": "object"},
+                                },
+                            },
+                        }
+                    ],
+                }
+            ],
         }
         with pytest.raises(ProxyException) as exc_info:
             await check_tools_allowlist(
@@ -388,24 +436,82 @@ class TestAnthropicInlineToolChanges:
                 team_object=None,
                 route="/v1/messages",
             )
-        assert "bare_tool" in str(exc_info.value.message)
+        assert exc_info.value.type == ProxyErrorTypes.tool_access_denied
+        assert "secret_tool" in str(exc_info.value.message)
 
-    def test_removed_tool_is_not_required(self):
+    def test_tool_reference_uses_the_wire_name_only(self):
         body = {
-            "tools": [{"name": "old_tool"}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_reference",
+                                "name": "wire_name",
+                                "tool_name": "decoy_name",
+                            },
+                        },
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_reference",
+                                "tool_name": "legacy_only",
+                            },
+                        },
+                    ],
+                }
+            ]
+        }
+        assert extract_request_tool_names("/v1/messages", body) == ["wire_name"]
+
+    def test_removal_does_not_hide_a_tool_from_allowlist(self):
+        body = {
+            "tools": [{"name": "allowed_tool"}, {"name": "secret_tool"}],
             "messages": [
                 {
                     "role": "system",
                     "content": [
                         {
                             "type": "tool_removal",
-                            "tool": {"type": "tool_reference", "name": "old_tool"},
+                            "tool": {"type": "tool_reference", "name": "secret_tool"},
                         }
                     ],
                 }
             ],
         }
-        assert extract_request_tool_names("/v1/messages", body) == []
+        assert extract_request_tool_names("/v1/messages", body) == [
+            "allowed_tool",
+            "secret_tool",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_removal_only_request_still_requires_the_removed_tool(self):
+        token = _token(metadata={"allowed_tools": ["allowed_tool"]})
+        body = {
+            "tools": [{"name": "allowed_tool"}, {"name": "secret_tool"}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_removal",
+                            "tool": {"type": "tool_reference", "name": "secret_tool"},
+                        }
+                    ],
+                }
+            ],
+        }
+        with pytest.raises(ProxyException) as exc_info:
+            await check_tools_allowlist(
+                request_body=body,
+                valid_token=token,
+                team_object=None,
+                route="/v1/messages",
+            )
+        assert exc_info.value.type == ProxyErrorTypes.tool_access_denied
+        assert "secret_tool" in str(exc_info.value.message)
 
     def test_re_added_reference_is_visible(self):
         body = {
