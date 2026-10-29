@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -22,41 +22,27 @@ def test_missing_api_key_error_is_a_401_client_error():
 
 @pytest.mark.parametrize(
     "configured, expected",
-    [(True, True), (False, False), (None, False)],
+    [(True, True), (False, False), (None, False), ("true", False)],
 )
 def test_suppress_flag_requires_explicit_true(configured, expected):
-    with patch(
-        "litellm.proxy.proxy_server.general_settings",
-        {"suppress_missing_api_key_logs": configured},
-    ):
-        assert should_suppress_missing_api_key_logs() is expected
+    assert should_suppress_missing_api_key_logs({"suppress_missing_api_key_logs": configured}) is expected
+    assert should_suppress_missing_api_key_logs({"count_missing_api_key_requests": configured}) is False
 
 
 @pytest.mark.parametrize(
     "configured, expected",
-    [(True, True), (False, False), (None, False)],
+    [(True, True), (False, False), (None, False), ("true", False)],
 )
 def test_count_flag_requires_explicit_true(configured, expected):
-    with patch(
-        "litellm.proxy.proxy_server.general_settings",
-        {"count_missing_api_key_requests": configured},
-    ):
-        assert should_count_missing_api_key_requests() is expected
+    assert should_count_missing_api_key_requests({"count_missing_api_key_requests": configured}) is expected
+    assert should_count_missing_api_key_requests({"suppress_missing_api_key_logs": configured}) is False
 
 
 @pytest.mark.asyncio
 async def test_record_increments_prometheus_counter():
     metric = MagicMock()
-    prometheus_logger = SimpleNamespace(litellm_missing_api_key_requests_metric=metric)
 
-    with (
-        patch(
-            "litellm.integrations.prometheus.PrometheusLogger.get_instance",
-            return_value=prometheus_logger,
-        ),
-        patch("litellm.proxy.proxy_server.redis_usage_cache", None),
-    ):
-        await record_missing_api_key_request()
+    await record_missing_api_key_request(SimpleNamespace(litellm_missing_api_key_requests_metric=metric), None)
 
     metric.inc.assert_called_once_with()
 
@@ -64,34 +50,25 @@ async def test_record_increments_prometheus_counter():
 @pytest.mark.asyncio
 async def test_record_increments_redis_total_counter():
     cache = MagicMock()
-    cache.increment_cache = MagicMock(return_value=1)
+    cache.async_increment = AsyncMock(return_value=1)
 
-    with (
-        patch(
-            "litellm.integrations.prometheus.PrometheusLogger.get_instance",
-            return_value=None,
-        ),
-        patch("litellm.proxy.proxy_server.redis_usage_cache", cache),
-    ):
-        await record_missing_api_key_request()
+    await record_missing_api_key_request(None, cache)
 
-    cache.increment_cache.assert_called_once_with(
+    cache.async_increment.assert_awaited_once_with(
         MISSING_API_KEY_TOTAL_COUNTER_KEY,
         1,
-        MISSING_API_KEY_TOTAL_COUNTER_TTL_SECONDS,
+        ttl=MISSING_API_KEY_TOTAL_COUNTER_TTL_SECONDS,
     )
 
 
 @pytest.mark.asyncio
-async def test_record_swallows_counter_failures():
+async def test_record_swallows_counter_failures_and_still_tries_redis():
+    metric = MagicMock()
+    metric.inc.side_effect = RuntimeError("prometheus broken")
     cache = MagicMock()
-    cache.increment_cache = MagicMock(side_effect=ConnectionError("redis down"))
+    cache.async_increment = AsyncMock(side_effect=ConnectionError("redis down"))
 
-    with (
-        patch(
-            "litellm.integrations.prometheus.PrometheusLogger.get_instance",
-            side_effect=RuntimeError("prometheus broken"),
-        ),
-        patch("litellm.proxy.proxy_server.redis_usage_cache", cache),
-    ):
-        await record_missing_api_key_request()
+    await record_missing_api_key_request(SimpleNamespace(litellm_missing_api_key_requests_metric=metric), cache)
+
+    metric.inc.assert_called_once_with()
+    cache.async_increment.assert_awaited_once()

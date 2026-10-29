@@ -113,9 +113,14 @@ class UserAPIKeyAuthExceptionHandler:
         else:
             # raise the exception to the caller
             is_missing_api_key: Final = isinstance(e, MissingAPIKeyError)
-            if is_missing_api_key and should_count_missing_api_key_requests():
-                await record_missing_api_key_request()
-            suppress_missing_api_key_logs: Final = is_missing_api_key and should_suppress_missing_api_key_logs()
+            if is_missing_api_key and should_count_missing_api_key_requests(general_settings):
+                from litellm.integrations.prometheus import PrometheusLogger
+                from litellm.proxy.proxy_server import redis_usage_cache
+
+                await record_missing_api_key_request(PrometheusLogger.get_instance(), redis_usage_cache)
+            suppress_missing_api_key_logs: Final = is_missing_api_key and should_suppress_missing_api_key_logs(
+                general_settings
+            )
             requester_ip: Final = _get_request_ip_address(
                 request=request,
                 use_x_forwarded_for=general_settings.get("use_x_forwarded_for") is True,
@@ -167,12 +172,16 @@ class UserAPIKeyAuthExceptionHandler:
                 )
 
             # Allow callbacks to transform the error response
-            transformed_exception: Final = await proxy_logging_obj.post_call_failure_hook(
-                request_data=_with_requester_ip_address(request_data, requester_ip),
-                original_exception=e,
-                user_api_key_dict=user_api_key_dict,
-                error_type=ProxyErrorTypes.auth_error,
-                route=route,
+            transformed_exception: Final = (
+                None
+                if suppress_missing_api_key_logs
+                else await proxy_logging_obj.post_call_failure_hook(
+                    request_data=_with_requester_ip_address(request_data, requester_ip),
+                    original_exception=e,
+                    user_api_key_dict=user_api_key_dict,
+                    error_type=ProxyErrorTypes.auth_error,
+                    route=route,
+                )
             )
             # Use transformed exception if callback returned one, otherwise use original
             if transformed_exception is not None:
