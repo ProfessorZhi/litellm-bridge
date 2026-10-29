@@ -1366,3 +1366,90 @@ class TestToolPermissionGuardrailAnthropicMessages:
         with patch.object(self.blocking, "should_run_guardrail", return_value=True):
             with pytest.raises(GuardrailRaisedException):
                 await self._drain(self.blocking, [b"data: not-json\n\n", b"event: weird\n\n"])
+
+
+class TestAnthropicInlineToolPermission:
+    """The tool permission guardrail must see tools a request adds mid-conversation."""
+
+    def setup_method(self):
+        self.guardrail = ToolPermissionGuardrail(
+            guardrail_name="test-inline-tool-permission",
+            rules=[
+                {"id": "allow_static", "tool_name": r"^static_tool$", "decision": "allow"},
+            ],
+            default_action="deny",
+            on_disallowed_action="block",
+        )
+
+    def test_collect_request_tools_includes_inline_addition(self):
+        data = {
+            "tools": [{"name": "static_tool"}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "dynamic_tool",
+                                    "input_schema": {"type": "object"},
+                                },
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        names = [name for name, _ in self.guardrail._collect_request_tools(data)]
+        assert names == ["static_tool", "dynamic_tool"]
+
+    def test_collect_request_tools_excludes_removed_tool(self):
+        data = {
+            "tools": [{"name": "old_tool"}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_removal",
+                            "tool": {"type": "tool_reference", "name": "old_tool"},
+                        }
+                    ],
+                }
+            ],
+        }
+        assert self.guardrail._collect_request_tools(data) == []
+
+    @pytest.mark.asyncio
+    async def test_pre_call_hook_blocks_disallowed_inline_addition(self):
+        data = {
+            "tools": [{"name": "static_tool"}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "dynamic_tool",
+                                    "input_schema": {"type": "object"},
+                                },
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        with patch.object(self.guardrail, "should_run_guardrail", return_value=True):
+            with pytest.raises(HTTPException) as excinfo:
+                await self.guardrail.async_pre_call_hook(
+                    user_api_key_dict=UserAPIKeyAuth(),
+                    cache=DualCache(default_in_memory_ttl=1),
+                    data=data,
+                    call_type="anthropic_messages",
+                )
+        assert excinfo.value.status_code == 400

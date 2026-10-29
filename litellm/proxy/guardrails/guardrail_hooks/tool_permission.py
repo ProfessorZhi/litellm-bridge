@@ -14,6 +14,10 @@ from litellm.integrations.custom_guardrail import (
     CustomGuardrail,
     log_guardrail_information,
 )
+from litellm.llms.anthropic.pass_through.messages.tool_changes import (
+    resolve_anthropic_tool_changes,
+)
+from litellm.llms.base_llm.guardrail_translation.utils import anthropic_tool_names
 from litellm.proxy._types import UserAPIKeyAuth
 from litellm.proxy.common_utils.callback_utils import (
     add_guardrail_to_applied_guardrails_header,
@@ -635,11 +639,15 @@ class ToolPermissionGuardrail(CustomGuardrail):
 
     def _collect_request_tools(self, data: dict) -> list[tuple[str, str | None]]:
         request_tools: Final[list[tuple[str, str | None]]] = []
+        changes: Final = resolve_anthropic_tool_changes(data)
 
         for tool in data.get("tools") or []:
             tool_name, tool_type = self._get_request_tool_name(tool)
-            if tool_name is not None:
+            if tool_name is not None and tool_name not in changes.removed:
                 request_tools.append((tool_name, tool_type))
+            for name in anthropic_tool_names(tool):
+                if name != tool_name and name not in changes.removed:
+                    request_tools.append((name, None))
 
         for function in data.get("functions") or []:
             function_name = self._get_legacy_function_name(function)
@@ -652,6 +660,11 @@ class ToolPermissionGuardrail(CustomGuardrail):
         ):
             if forced_tool_name is not None:
                 request_tools.append((forced_tool_name, "function"))
+
+        existing_names: Final = frozenset(name for name, _ in request_tools)
+        for tool_name in changes.added:
+            if tool_name not in changes.removed and tool_name not in existing_names:
+                request_tools.append((tool_name, None))
 
         return request_tools
 

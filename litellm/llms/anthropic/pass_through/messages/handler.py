@@ -104,6 +104,15 @@ def _deployment_supports_cache_control_ttl(model_info: object) -> bool:
     return isinstance(model_info, dict) and model_info.get("cache_control_ttl") is True
 
 
+def _uses_deepseek_wire_compatibility(provider: str | None, model_info: object) -> bool:
+    """Explicit deployment opt-in; real Anthropic endpoints keep their native tool semantics."""
+    return (
+        provider == "anthropic"
+        and isinstance(model_info, dict)
+        and model_info.get("anthropic_messages_compatibility") == "deepseek"
+    )
+
+
 ####### ENVIRONMENT VARIABLES ###################
 # Initialize any necessary instances or variables here
 base_llm_http_handler = BaseLLMHTTPHandler()
@@ -543,6 +552,12 @@ def anthropic_messages_handler(
             model=model,
             provider=litellm.LlmProviders(custom_llm_provider),
         )
+    if _uses_deepseek_wire_compatibility(custom_llm_provider, kwargs.get("model_info")):
+        from litellm.llms.deepseek.messages.transformation import (
+            DeepSeekCompatAnthropicMessagesConfig,
+        )
+
+        anthropic_messages_provider_config = DeepSeekCompatAnthropicMessagesConfig()
     if anthropic_messages_provider_config is None and _deployment_passes_through_anthropic_messages(
         kwargs.get("model_info")
     ):

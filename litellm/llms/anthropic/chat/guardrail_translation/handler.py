@@ -29,6 +29,9 @@ from litellm.llms.anthropic.pass_through.adapters.transformation import (
     LiteLLMAnthropicMessagesAdapter,
     is_provider_native_tool_dict,
 )
+from litellm.llms.anthropic.pass_through.messages.tool_changes import (
+    resolve_anthropic_tool_changes,
+)
 from litellm.llms.base_llm.guardrail_translation.base_translation import (
     BaseTranslation,
     StreamingScanKey,
@@ -36,7 +39,6 @@ from litellm.llms.base_llm.guardrail_translation.base_translation import (
 )
 from litellm.llms.base_llm.guardrail_translation.utils import (
     anthropic_tool_name,
-    anthropic_tool_names,
     effective_scan_only_tool_results_for_guardrail,
     effective_skip_system_message_for_guardrail,
     effective_skip_tool_message_for_guardrail,
@@ -921,9 +923,8 @@ class AnthropicMessagesHandler(BaseTranslation):
         )
 
     def extract_request_tool_names(self, data: dict) -> list[str]:
-        """Extract every tool name in an Anthropic messages request: tools[].name, plus
-        tools[].function.name for OpenAI-format tools the bridge forwards verbatim."""
-        return [name for tool in data.get("tools") or [] for name in anthropic_tool_names(tool)]
+        """Every tool the request can act on, including inline mid-conversation changes."""
+        return list(resolve_anthropic_tool_changes(data).effective)
 
     @classmethod
     def _extract_input_text_and_images(
