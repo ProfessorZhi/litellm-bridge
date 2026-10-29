@@ -13,7 +13,7 @@ Pattern Overview:
 """
 
 import json
-from collections.abc import Iterable, Iterator, Mapping, MutableSequence, Sequence
+from collections.abc import Mapping, MutableSequence, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from itertools import chain, repeat
@@ -30,11 +30,11 @@ from litellm.llms.anthropic.pass_through.adapters.transformation import (
     is_provider_native_tool_dict,
 )
 from litellm.llms.anthropic.pass_through.messages.tool_changes import (
-    inline_tool_definitions,
-    object_list,
-    object_mapping,
+    declared_tools_only,
+    inline_guardrail_tools,
+    inline_tools_denied_by_guardrail,
+    messages_without_inline_tools,
     resolve_anthropic_tool_names,
-    strip_inline_tool_additions,
 )
 from litellm.llms.base_llm.guardrail_translation.base_translation import (
     BaseTranslation,
@@ -43,7 +43,6 @@ from litellm.llms.base_llm.guardrail_translation.base_translation import (
 )
 from litellm.llms.base_llm.guardrail_translation.utils import (
     anthropic_tool_name,
-    anthropic_tool_names,
     effective_scan_only_tool_results_for_guardrail,
     effective_skip_system_message_for_guardrail,
     effective_skip_tool_message_for_guardrail,
@@ -66,7 +65,6 @@ from litellm.types.llms.openai import (
     ChatCompletionRequest,
     ChatCompletionToolCallChunk,
     ChatCompletionToolParam,
-    ChatCompletionToolParamFunctionChunk,
 )
 from litellm.types.utils import (
     ChatCompletionMessageToolCall,
@@ -290,61 +288,6 @@ def _tool_call_shapes(tool_calls: Sequence[object]) -> tuple[_ToolCallShape, ...
         )
         for function in functions
     )
-
-
-def _openai_tool_from_definition(definition: Mapping[str, object]) -> ChatCompletionToolParam | None:
-    name: Final = definition.get("name")
-    if not isinstance(name, str) or not name:
-        return None
-    description: Final = definition.get("description")
-    parameters: Final = object_mapping(definition.get("input_schema"))
-    function: Final[ChatCompletionToolParamFunctionChunk] = ChatCompletionToolParamFunctionChunk(name=name)
-    if isinstance(description, str):
-        function["description"] = description
-    if parameters is not None:
-        function["parameters"] = dict(parameters)
-    return ChatCompletionToolParam(type="function", function=function)
-
-
-def _inline_tools_to_check(
-    definitions: Iterable[Mapping[str, object]], names: frozenset[str]
-) -> Iterator[ChatCompletionToolParam]:
-    for definition in definitions:
-        if definition.get("name") not in names:
-            continue
-        tool = _openai_tool_from_definition(definition)
-        if tool is not None:
-            yield tool
-
-
-def _messages_without_denied_inline_tools(messages: object, denied: frozenset[str]) -> object:
-    if not isinstance(messages, list):
-        return messages
-    return [
-        strip_inline_tool_additions(message, denied)
-        for message in object_list(messages)  # pyright: ignore[reportUnknownArgumentType]  # messages was narrowed from an untyped JSON array
-    ]
-
-
-def _tools_to_write_back(
-    guardrailed_tools: Sequence[ChatCompletionToolParam], inline_only_names: frozenset[str]
-) -> tuple[ChatCompletionToolParam, ...]:
-    return tuple(tool for tool in guardrailed_tools if not inline_only_names.intersection(anthropic_tool_names(tool)))
-
-
-def _inline_guardrail_tools(
-    data: Mapping[str, object], scan_only: bool
-) -> tuple[tuple[ChatCompletionToolParam, ...], frozenset[str]]:
-    if scan_only:
-        return (), frozenset()
-    definitions: Final = inline_tool_definitions(data)
-    existing: Final = frozenset(
-        chain.from_iterable(anthropic_tool_names(tool) for tool in object_list(data.get("tools")))
-    )
-    inline_only: Final = frozenset(
-        name for definition in definitions if isinstance(name := definition.get("name"), str) and name not in existing
-    )
-    return tuple(_inline_tools_to_check(definitions, inline_only)), inline_only
 
 
 class _AnthropicSSEDelta(TypedDict, total=False):
@@ -630,21 +573,16 @@ class AnthropicMessagesHandler(BaseTranslation):
         )
         structured_messages: Final = [full_structured_messages[index] for index in scoped_message_indices]
 
-        inline_tools_to_check, inline_only_names = _inline_guardrail_tools(  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is a bare dict
-            data, scan_only_tool_results
-        )
-
+        inline_tools_to_check, inline_only_names = inline_guardrail_tools(data, scan_only_tool_results)  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
         tools_to_check: Final[list[ChatCompletionToolParam]] = (
             []
             if scan_only_tool_results
             else [
-                *(
-                    tool
-                    for tool in chat_completion_compatible_request.get("tools") or []  # pyright: ignore[reportUnknownMemberType]  # ChatCompletionRequest.get overload exposes Any
-                    if not is_provider_native_tool_dict(tool)
-                ),
-                *inline_tools_to_check,
+                tool
+                for tool in chat_completion_compatible_request.get("tools", [])
+                if not is_provider_native_tool_dict(tool)
             ]
+            + list(inline_tools_to_check)
         )
 
         # Step 1: Extract all text content, images, and tool calls
@@ -699,16 +637,14 @@ class AnthropicMessagesHandler(BaseTranslation):
             guardrailed_texts: Final = guardrailed_inputs.get("texts", [])
             guardrailed_tools: Final = guardrailed_inputs.get("tools")
             if guardrailed_tools is not None:
-                returned_tool_names: Final = frozenset(
-                    chain.from_iterable(anthropic_tool_names(tool) for tool in guardrailed_tools)
-                )
-                denied_inline_names: Final = inline_only_names - returned_tool_names
+                denied_inline_names: Final = inline_tools_denied_by_guardrail(guardrailed_tools, inline_only_names)
                 if denied_inline_names:
-                    data["messages"] = _messages_without_denied_inline_tools(data.get("messages"), denied_inline_names)
+                    kept_messages: Final = messages_without_inline_tools(data.get("messages"), denied_inline_names)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # proxy request body is an untyped dict
+                    data["messages"] = kept_messages  # rebind-ok: tools[] is rewritten in place below too
                 # Convert tools back from OpenAI format to Anthropic format
                 anthropic_config: Final = AnthropicConfig()
                 anthropic_tools: Final[list[AllAnthropicToolsValues]] = []
-                for tool in _tools_to_write_back(guardrailed_tools, inline_only_names):
+                for tool in declared_tools_only(guardrailed_tools, inline_only_names):
                     converted_tool, mcp_server = anthropic_config.map_tool_helper(tool)
                     if converted_tool is not None:
                         anthropic_tools.append(converted_tool)
@@ -996,9 +932,10 @@ class AnthropicMessagesHandler(BaseTranslation):
             images=(),
         )
 
-    def extract_request_tool_names(self, data: Mapping[str, object]) -> list[str]:
-        """Every tool the request can act on, including inline mid-conversation additions."""
-        return list(resolve_anthropic_tool_names(data))
+    def extract_request_tool_names(self, data: dict) -> list[str]:
+        """Every tool the request can act on: tools[].name, tools[].function.name for OpenAI-format
+        tools the bridge forwards verbatim, and inline mid-conversation additions."""
+        return list(resolve_anthropic_tool_names(data))  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
 
     @classmethod
     def _extract_input_text_and_images(

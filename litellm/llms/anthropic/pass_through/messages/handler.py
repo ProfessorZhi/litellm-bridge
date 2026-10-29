@@ -95,16 +95,14 @@ def _deployment_passes_through_anthropic_messages(model_info: object) -> bool:
     declared per deployment in config.yaml and plumbed here as ``kwargs["model_info"]``
     by the router.
     """
-    info: Final = object_mapping(model_info)
-    if info is None:
+    if not isinstance(model_info, dict):
         return False
-    supported_endpoints: Final = info.get("supported_endpoints")
+    supported_endpoints: Final = model_info.get("supported_endpoints")
     return isinstance(supported_endpoints, (list, tuple)) and "/v1/messages" in supported_endpoints
 
 
 def _deployment_supports_cache_control_ttl(model_info: object) -> bool:
-    info: Final = object_mapping(model_info)
-    return info is not None and info.get("cache_control_ttl") is True
+    return isinstance(model_info, dict) and model_info.get("cache_control_ttl") is True
 
 
 def _uses_deepseek_wire_compatibility(provider: str | None, model_info: object) -> bool:

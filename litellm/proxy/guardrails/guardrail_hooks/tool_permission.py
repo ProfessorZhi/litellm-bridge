@@ -6,6 +6,7 @@ from typing import Any, Final, Literal, TypedDict
 from fastapi import HTTPException
 from typing_extensions import ReadOnly, Required
 
+from litellm import ChatCompletionToolParam
 from litellm._logging import verbose_proxy_logger
 from litellm.caching.dual_cache import DualCache
 from litellm.exceptions import GuardrailRaisedException
@@ -14,9 +15,9 @@ from litellm.integrations.custom_guardrail import (
     log_guardrail_information,
 )
 from litellm.llms.anthropic.pass_through.messages.tool_changes import (
-    object_list,
+    is_anthropic_messages_call,
+    messages_without_inline_tools,
     resolve_anthropic_tool_names,
-    strip_inline_tool_additions,
 )
 from litellm.llms.base_llm.guardrail_translation.utils import anthropic_tool_names
 from litellm.proxy._types import UserAPIKeyAuth
@@ -45,12 +46,6 @@ from litellm.types.utils import (
 )
 
 GUARDRAIL_NAME: Final = "tool_permission"
-
-_ANTHROPIC_MESSAGES_CALL_TYPES: Final = frozenset({"anthropic_messages", "aanthropic_messages"})
-
-
-def _is_anthropic_messages_call(call_type: object) -> bool:
-    return getattr(call_type, "value", call_type) in _ANTHROPIC_MESSAGES_CALL_TYPES
 
 
 def _object_mapping(value: object) -> Mapping[str, object] | None:
@@ -473,15 +468,10 @@ class ToolPermissionGuardrail(CustomGuardrail):
         return is_allowed, None, message
 
     @staticmethod
-    def _get_mapping_value(item: object, key: str) -> object:
+    def _get_mapping_value(item: object, key: str) -> Any:
         if isinstance(item, dict):
             return item.get(key)
-        return getattr(item, key, None)  # pyright: ignore[reportAny]  # attribute holder is untyped
-
-    @classmethod
-    def _get_mapping_str(cls, item: object, key: str) -> str | None:
-        value: Final = cls._get_mapping_value(item, key)
-        return value if isinstance(value, str) else None
+        return getattr(item, key, None)
 
     @staticmethod
     def _legacy_function_call_id(choice_index: int) -> str:
@@ -493,9 +483,8 @@ class ToolPermissionGuardrail(CustomGuardrail):
         if function_call is None:
             return None
 
-        function_name: Final = self._get_mapping_str(function_call, "name")
-        arguments_value: Final = self._get_mapping_value(function_call, "arguments")
-        arguments: Final = arguments_value if isinstance(arguments_value, str) else ""
+        function_name: Final = self._get_mapping_value(function_call, "name")
+        arguments: Final = self._get_mapping_value(function_call, "arguments") or ""
         if not function_name:
             return None
 
@@ -621,51 +610,51 @@ class ToolPermissionGuardrail(CustomGuardrail):
             response["stop_reason"] = "end_turn"  # rebind-ok: dropping every tool_use ends the turn
 
     def _get_request_tool_name(self, tool: object) -> tuple[str | None, str | None]:
-        tool_type: Final = self._get_mapping_str(tool, "type")
+        tool_type: Final = self._get_mapping_value(tool, "type")
         if tool_type != "function":
             return None, tool_type
 
         function: Final = self._get_mapping_value(tool, "function")
-        return self._get_mapping_str(function, "name"), tool_type
+        tool_name: Final = self._get_mapping_value(function, "name")
+        return tool_name, tool_type
 
     def _get_legacy_function_name(self, function: object) -> str | None:
-        return self._get_mapping_str(function, "name")
+        return self._get_mapping_value(function, "name")
 
-    def _get_named_tool_choice(self, data: Mapping[str, object]) -> str | None:
+    def _get_named_tool_choice(self, data: dict) -> str | None:
         tool_choice: Final = data.get("tool_choice")
         if not tool_choice or tool_choice in ("auto", "none", "required"):
             return None
         if isinstance(tool_choice, str):
             return tool_choice
-        tool_choice_type: Final = self._get_mapping_str(tool_choice, "type")
-        if tool_choice_type == "tool":
-            return self._get_mapping_str(tool_choice, "name")
-        if tool_choice_type != "function":
+        if self._get_mapping_value(tool_choice, "type") == "tool":  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
+            return self._get_mapping_value(tool_choice, "name")  # pyright: ignore[reportAny, reportUnknownArgumentType]  # proxy request body is an untyped dict
+        if self._get_mapping_value(tool_choice, "type") != "function":
             return None
-        return self._get_mapping_str(self._get_mapping_value(tool_choice, "function"), "name")
+        return self._get_mapping_value(self._get_mapping_value(tool_choice, "function"), "name")
 
-    def _get_named_function_call(self, data: Mapping[str, object]) -> str | None:
+    def _get_named_function_call(self, data: dict) -> str | None:
         function_call: Final = data.get("function_call")
         if not function_call or function_call in ("auto", "none"):
             return None
         if isinstance(function_call, str):
             return function_call
-        return self._get_mapping_str(function_call, "name")
+        return self._get_mapping_value(function_call, "name")
 
     def _collect_request_tools(
-        self, data: Mapping[str, object], call_type: object = None
-    ) -> tuple[tuple[str, str | None], ...]:
-        request_tools: Final[list[tuple[str, str | None]]] = []  # mutable-ok: collected from several request surfaces
+        self,
+        data: dict,
+        call_type: object = None,
+    ) -> list[tuple[str, str | None]]:  # mutable-ok: upstream signature, only call_type is new
+        request_tools: Final[list[tuple[str, str | None]]] = []
 
-        for tool in object_list(data.get("tools")):
+        for tool in data.get("tools") or []:
             tool_name, tool_type = self._get_request_tool_name(tool)
             if tool_name is not None:
                 request_tools.append((tool_name, tool_type))
-            for name in anthropic_tool_names(tool):
-                if name != tool_name:
-                    request_tools.append((name, None))
+            request_tools.extend((name, None) for name in anthropic_tool_names(tool) if name != tool_name)  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
 
-        for function in object_list(data.get("functions")):
+        for function in data.get("functions") or []:
             function_name = self._get_legacy_function_name(function)
             if function_name is not None:
                 request_tools.append((function_name, "function"))
@@ -677,61 +666,64 @@ class ToolPermissionGuardrail(CustomGuardrail):
             if forced_tool_name is not None:
                 request_tools.append((forced_tool_name, "function"))
 
-        if _is_anthropic_messages_call(call_type):
-            existing_names: Final = frozenset(name for name, _ in request_tools)
-            for tool_name in resolve_anthropic_tool_names(data):
-                if tool_name not in existing_names:
-                    request_tools.append((tool_name, None))
+        if is_anthropic_messages_call(call_type):
+            seen: Final = frozenset(name for name, _ in request_tools)
+            request_tools.extend((name, None) for name in resolve_anthropic_tool_names(data) if name not in seen)  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
 
-        return tuple(request_tools)
+        return request_tools
 
     def _modify_request_with_permission_errors(
         self,
-        data: Mapping[str, object],
+        data: dict,
         denied_tool_names: list[str],
-        call_type: object = None,
-    ) -> dict[str, object]:  # mutable-ok: the rewritten proxy request body
+    ):
         """
-        Modify the request to strip denied tool declarations and calls.
+        Modify the request to replace denied tool_calls blocks with error results
 
         Args:
             data: The model request to modify
-            denied_tool_names: Names the configured policy denied
-            call_type: The endpoint call type, used to scope inline tool changes
+            denied_tools: List of (tool_use, error) tuples for denied tools
         """
         if not denied_tool_names:
-            return dict(data)
+            return data
 
         verbose_proxy_logger.info("Blocking %s unauthorized tool uses", len(denied_tool_names))
-        denied: Final = frozenset(denied_tool_names)
-        updated: Final = dict(data)
 
-        tools: Final = object_list(updated.get("tools"))
-        if tools:
-            updated["tools"] = [tool for tool in tools if not denied.intersection(anthropic_tool_names(tool))]
+        # Create a mapping of tool_use_id to error result
+        error_tool_names: Final = set()
+        for tool_use in denied_tool_names:
+            error_tool_names.add(tool_use)
 
-        functions: Final = object_list(updated.get("functions"))
-        if functions:
-            updated["functions"] = [
-                function for function in functions if self._get_legacy_function_name(function) not in denied
+        tools: Final[list[ChatCompletionToolParam] | None] = data.get("tools")
+        if tools is not None:
+            new_tools: Final = []
+            for tool in tools:
+                if error_tool_names.intersection(anthropic_tool_names(tool)):  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
+                    continue
+                new_tools.append(tool)
+            data["tools"] = new_tools
+
+        functions: Final = data.get("functions")
+        if functions is not None:
+            data["functions"] = [
+                function for function in functions if self._get_legacy_function_name(function) not in error_tool_names
             ]
 
-        named_tool_choice: Final = self._get_named_tool_choice(updated)
-        if named_tool_choice in denied:
-            updated["tool_choice"] = (
-                {"type": "none"} if self._get_mapping_str(updated.get("tool_choice"), "type") == "tool" else "none"
+        named_tool_choice: Final = self._get_named_tool_choice(data)
+        if named_tool_choice in error_tool_names:
+            data["tool_choice"] = (  # rebind-ok: the method already rewrites the request in place
+                {"type": "none"} if self._get_mapping_value(data.get("tool_choice"), "type") == "tool" else "none"  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # proxy request body is an untyped dict
             )
 
-        named_function_call: Final = self._get_named_function_call(updated)
-        if named_function_call in denied:
-            updated["function_call"] = "none"
+        named_function_call: Final = self._get_named_function_call(data)
+        if named_function_call in error_tool_names:
+            data["function_call"] = "none"
 
-        if _is_anthropic_messages_call(call_type):
-            messages: Final = object_list(updated.get("messages"))
-            if messages:
-                updated["messages"] = [strip_inline_tool_additions(message, denied) for message in messages]
+        if "messages" in data:
+            kept_messages: Final = messages_without_inline_tools(data["messages"], error_tool_names)  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
+            data["messages"] = kept_messages  # rebind-ok: the method already rewrites the request in place
 
-        return updated
+        return data
 
     def _create_permission_error_result(
         self, tool_call: ChatCompletionMessageToolCall, error: PermissionError
@@ -821,7 +813,7 @@ class ToolPermissionGuardrail(CustomGuardrail):
         self,
         user_api_key_dict: UserAPIKeyAuth,
         cache: DualCache,
-        data: dict[str, object],  # mutable-ok: proxy request body
+        data: dict,
         call_type: CallTypesLiteral,
     ) -> Exception | str | dict | None:
         """ """
@@ -843,7 +835,7 @@ class ToolPermissionGuardrail(CustomGuardrail):
             return data
 
         # Check permissions for each tool
-        denied_tool_names: Final[list[str]] = []  # mutable-ok: names denied during one pre-call pass
+        denied_tool_names: Final = []
         for tool_name, tool_type in new_tools:
             is_allowed, _, message = self._check_tool_permission(tool_name, tool_type)
 
@@ -859,16 +851,13 @@ class ToolPermissionGuardrail(CustomGuardrail):
                     )
                 denied_tool_names.append(tool_name)
 
-        final_data: Final = (
-            self._modify_request_with_permission_errors(data, denied_tool_names, call_type)
-            if denied_tool_names
-            else data
-        )
+        if denied_tool_names:
+            data = self._modify_request_with_permission_errors(data, denied_tool_names)
 
         verbose_proxy_logger.debug("Tool Permission Guardrail Pre-Call Hook: All tools allowed")
 
-        add_guardrail_to_applied_guardrails_header(request_data=final_data, guardrail_name=self.guardrail_name)
-        return final_data
+        add_guardrail_to_applied_guardrails_header(request_data=data, guardrail_name=self.guardrail_name)
+        return data
 
     @log_guardrail_information
     async def async_post_call_success_hook(

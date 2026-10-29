@@ -7,13 +7,16 @@ chat-completions and Responses bridges drop the removal block but still forward
 A removal-only request therefore still has to satisfy the allowlist.
 """
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence, Set
 from itertools import chain
 from typing import Final
 
 from pydantic import TypeAdapter, ValidationError
 
 from litellm.llms.base_llm.guardrail_translation.utils import anthropic_tool_names
+from litellm.types.llms.openai import ChatCompletionToolParam, ChatCompletionToolParamFunctionChunk
+
+_ANTHROPIC_MESSAGES_CALL_TYPES: Final = frozenset({"anthropic_messages", "aanthropic_messages"})
 
 _OBJECT_MAPPING: Final = TypeAdapter(Mapping[str, object])
 _OBJECT_LIST: Final = TypeAdapter(list[object])
@@ -106,7 +109,7 @@ def inline_tool_definitions(data: Mapping[str, object]) -> tuple[Mapping[str, ob
     )
 
 
-def strip_inline_tool_additions(message: object, names: frozenset[str]) -> object:
+def strip_inline_tool_additions(message: object, names: Set[str]) -> object:
     """Drop the inline additions that declare one of ``names``; other blocks are untouched."""
     fields: Final = object_mapping(message)
     if fields is None or fields.get("role") != "system":
@@ -123,3 +126,63 @@ def resolve_anthropic_tool_names(data: Mapping[str, object]) -> tuple[str, ...]:
     tools: Final = object_list(data.get("tools"))
     base: Final = _dedupe(chain.from_iterable(anthropic_tool_names(tool) for tool in tools))
     return _dedupe((*base, *_iter_added_names(data.get("messages"))))
+
+
+def is_anthropic_messages_call(call_type: object) -> bool:
+    return getattr(call_type, "value", call_type) in _ANTHROPIC_MESSAGES_CALL_TYPES
+
+
+def messages_without_inline_tools(messages: object, names: Set[str]) -> object:
+    """``messages`` with the inline additions of ``names`` dropped; a non-list is returned as is."""
+    if not isinstance(messages, list):
+        return messages
+    return [strip_inline_tool_additions(message, names) for message in object_list(messages)]  # pyright: ignore[reportUnknownArgumentType]  # messages was narrowed from an untyped JSON array
+
+
+def _openai_tool_from_definition(definition: Mapping[str, object]) -> ChatCompletionToolParam | None:
+    name: Final = definition.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    description: Final = definition.get("description")
+    parameters: Final = object_mapping(definition.get("input_schema"))
+    function: Final[ChatCompletionToolParamFunctionChunk] = ChatCompletionToolParamFunctionChunk(name=name)
+    if isinstance(description, str):
+        function["description"] = description
+    if parameters is not None:
+        function["parameters"] = dict(parameters)
+    return ChatCompletionToolParam(type="function", function=function)
+
+
+def inline_guardrail_tools(
+    data: Mapping[str, object], scan_only: bool
+) -> tuple[tuple[ChatCompletionToolParam, ...], frozenset[str]]:
+    """Inline definitions a guardrail must also scan, and the names declared only inline."""
+    if scan_only:
+        return (), frozenset()
+    definitions: Final = inline_tool_definitions(data)
+    declared: Final = frozenset(
+        chain.from_iterable(anthropic_tool_names(tool) for tool in object_list(data.get("tools")))
+    )
+    inline_only: Final = frozenset(
+        name for definition in definitions if isinstance(name := definition.get("name"), str) and name not in declared
+    )
+    tools: Final = tuple(
+        tool
+        for definition in definitions
+        if definition.get("name") in inline_only and (tool := _openai_tool_from_definition(definition)) is not None
+    )
+    return tools, inline_only
+
+
+def inline_tools_denied_by_guardrail(
+    guardrailed_tools: Sequence[ChatCompletionToolParam], inline_only_names: frozenset[str]
+) -> frozenset[str]:
+    returned: Final = frozenset(chain.from_iterable(anthropic_tool_names(tool) for tool in guardrailed_tools))
+    return inline_only_names - returned
+
+
+def declared_tools_only(
+    guardrailed_tools: Sequence[ChatCompletionToolParam], inline_only_names: frozenset[str]
+) -> tuple[ChatCompletionToolParam, ...]:
+    """Drop the inline-only tools a guardrail returned; they live in messages, not in tools[]."""
+    return tuple(tool for tool in guardrailed_tools if not inline_only_names.intersection(anthropic_tool_names(tool)))
