@@ -1,0 +1,8 @@
+before_restart spendlogs=71 redis=6 ttl=2591957 prom=6.0
+after_restart  spendlogs=71 redis=6 ttl=2591889 prom=
+redis=6
+prom=0.0
+spendlogs=71
+redis=7
+prom=1.0
+spendlogs=71

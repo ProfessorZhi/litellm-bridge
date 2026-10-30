@@ -1,0 +1,13 @@
+mode=filtered kind=matrix head=e4980116d097f49fbb00a551f254049e2bf26968
+[before] spendlogs=65 redis= prom=6.0 console_missing=0 callback=30
+PASS spendlogs_delta expected=5 actual=5
+PASS redis_delta expected=3 actual=3
+PASS prom_delta expected=3 actual=3
+PASS console_missing_delta expected=0 actual=0
+PASS callback_delta expected=4 actual=4
+PASS models_status expected=401 actual=401
+PASS messages_status expected=401 actual=401
+PASS chat_status expected=401 actual=401
+PASS missing_key_bodies_identical
+[after] spendlogs=70 redis=3 prom=9.0 console_missing=0 callback=34
+failures=0

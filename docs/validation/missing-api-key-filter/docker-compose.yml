@@ -1,0 +1,96 @@
+name: ${COMPOSE_PROJECT:-litellm-authfilter}
+services:
+  mock:
+    image: ${LITELLM_IMAGE:?set LITELLM_IMAGE to a LiteLLM image with its Python venv}
+    container_name: ${COMPOSE_PROJECT:-litellm-authfilter}-mock
+    entrypoint: ["/app/.venv/bin/python", "/mock/mock_upstream.py"]
+    volumes:
+      - ./mock_upstream.py:/mock/mock_upstream.py:ro
+      - ./evidence:/evidence
+    environment:
+      MOCK_UPSTREAM_KEY: ${MOCK_UPSTREAM_KEY:?set MOCK_UPSTREAM_KEY}
+      MOCK_LOG: /evidence/mock-upstream.jsonl
+    ports:
+      - 127.0.0.1:${MOCK_PORT:-8080}:8080
+    networks: [internal]
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ${COMPOSE_PROJECT:-litellm-authfilter}-postgres
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: litellm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT:-litellm-authfilter}-redis
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD} ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: "no"
+
+  litellm:
+    image: ${LITELLM_IMAGE:?set LITELLM_IMAGE to a LiteLLM image with its Python venv}
+    container_name: ${COMPOSE_PROJECT:-litellm-authfilter}-proxy
+    command:
+      - --config=/app/config.yaml
+      - --host=0.0.0.0
+      - --port=4000
+      - --num_workers=${LITELLM_NUM_WORKERS:-1}
+    ports:
+      - 127.0.0.1:${PROXY_PORT:-4000}:4000
+    volumes:
+      - ${LITELLM_SOURCE:?set LITELLM_SOURCE to the LiteLLM checkout}:/src:ro
+      - ./config-${CONFIG_FILE:-baseline}.yaml:/app/config.yaml:ro
+      - ./callback_probe.py:/app/callback_probe.py:ro
+      - ./evidence:/evidence
+    environment:
+      PYTHONPATH: /src
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY}
+      MOCK_UPSTREAM_KEY: ${MOCK_UPSTREAM_KEY:?set MOCK_UPSTREAM_KEY}
+      DATABASE_URL: postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/litellm
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      CALLBACK_PROBE_LOG: /evidence/callback-probe-runtime.jsonl
+      CALLBACK_PROBE_REWRITE: ${CALLBACK_PROBE_REWRITE:-false}
+    networks: [internal]
+    depends_on:
+      mock:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /app/.venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness')"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: "no"
+
+networks:
+  internal:
+    name: ${COMPOSE_PROJECT:-litellm-authfilter}-internal
+
+volumes:
+  pgdata:
+    name: ${COMPOSE_PROJECT:-litellm-authfilter}-pgdata
