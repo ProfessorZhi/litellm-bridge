@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - "litellm_**"
+      - "update/106-dev"
   push:
     branches:
       - main
