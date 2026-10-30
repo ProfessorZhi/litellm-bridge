@@ -1,5 +1,0 @@
-method: POST
-authorization: Bearer <redacted>
-content-type: application/json
-anthropic-version: 2023-06-01
-auth_header: x-api-key

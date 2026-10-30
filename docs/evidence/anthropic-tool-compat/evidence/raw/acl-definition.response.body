@@ -1,1 +1,0 @@
-{"error":{"message":"Tool(s) ['secret_definition_live'] are not in the allowed tools list for this key/team.","type":"tool_access_denied","param":"tools","code":"403"}}

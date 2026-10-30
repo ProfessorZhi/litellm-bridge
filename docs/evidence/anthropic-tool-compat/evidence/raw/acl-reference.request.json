@@ -1,1 +1,0 @@
-{"model":"v4pro-compat","max_tokens":32,"tools":[{"name":"allowed_tool","input_schema":{"type":"object"}}],"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"secret_reference_live"}}]},{"role":"user","content":"case-acl-reference-live"}]}

@@ -1,1 +1,0 @@
-{"model_name":"v4pro-plain","litellm_params":{"model":"anthropic/deepseek-flash","api_base":"https://api.deepseek.com/anthropic","api_key":"os.environ/DEEPSEEK_API_KEY"}}
