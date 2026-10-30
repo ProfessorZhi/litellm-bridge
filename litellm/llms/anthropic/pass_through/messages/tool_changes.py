@@ -222,13 +222,17 @@ def _inline_tool_removal_name(block: object) -> str | None:
     return _reference_name(tool) if tool is not None and tool.get("type") == "tool_reference" else None
 
 
-def withdrawn_declarations(data: Mapping[str, object], inline_names: frozenset[str]) -> tuple[object, ...]:
-    """tools[] entries an inline redefinition replaces and a ``tool_removal`` withdraws.
-
-    The guardrail scans the redefinition instead of these, and they must stay in tools[] so
-    the removal still resolves; being withdrawn, the provider cannot call them.
-    """
-    withdrawn: Final = inline_names.intersection(
+def withdrawn_tool_names(data: Mapping[str, object]) -> frozenset[str]:
+    return frozenset(
         name for block in _system_content_blocks(data.get("messages")) if (name := _inline_tool_removal_name(block))
     )
-    return tuple(tool for tool in object_list(data.get("tools")) if withdrawn.intersection(anthropic_tool_names(tool)))
+
+
+def shadowed_declarations(data: Mapping[str, object], names: frozenset[str]) -> tuple[object, ...]:
+    """tools[] declarations shadowed by an inline declaration in ``names``.
+
+    They stay in tools[] so a ``tool_removal`` still resolves. Keeping an allowed
+    same-name redefinition's old declaration also makes the transform's conflict check
+    refuse when there is no withdrawal, instead of silently dropping the old schema.
+    """
+    return tuple(tool for tool in object_list(data.get("tools")) if names.intersection(anthropic_tool_names(tool)))

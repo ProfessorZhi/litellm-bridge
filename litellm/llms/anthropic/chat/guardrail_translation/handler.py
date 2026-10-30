@@ -35,7 +35,8 @@ from litellm.llms.anthropic.pass_through.messages.tool_changes import (
     inline_tools_denied_by_guardrail,
     messages_without_inline_tools,
     resolve_anthropic_tool_names,
-    withdrawn_declarations,
+    shadowed_declarations,
+    withdrawn_tool_names,
 )
 from litellm.llms.base_llm.guardrail_translation.base_translation import (
     BaseTranslation,
@@ -648,6 +649,9 @@ class AnthropicMessagesHandler(BaseTranslation):
             guardrailed_tools: Final = guardrailed_inputs.get("tools")
             if guardrailed_tools is not None:
                 denied_inline_names: Final = inline_tools_denied_by_guardrail(guardrailed_tools, inline_definitions)
+                kept_shadowed_names: Final = (inline_names - denied_inline_names) | (
+                    denied_inline_names & withdrawn_tool_names(data)
+                )
                 if denied_inline_names:
                     kept_messages: Final = messages_without_inline_tools(data.get("messages"), denied_inline_names)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # proxy request body is an untyped dict
                     data["messages"] = kept_messages  # rebind-ok: tools[] is rewritten in place below too
@@ -668,7 +672,7 @@ class AnthropicMessagesHandler(BaseTranslation):
                     if scan_only_tool_results
                     else [
                         *(tool for tool in data.get("tools") or [] if is_provider_native_tool_dict(tool)),
-                        *withdrawn_declarations(data, inline_names),  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
+                        *shadowed_declarations(data, kept_shadowed_names),  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
                         *anthropic_tools,
                     ]
                 )

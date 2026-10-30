@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
+import litellm
 from litellm.integrations.custom_guardrail import CustomGuardrail
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.llms.base_llm.guardrail_translation.base_translation import StreamingScanKey
@@ -3048,3 +3048,49 @@ async def test_same_name_redefinition_still_converts_for_deepseek_after_a_guardr
 
     redefined = [tool for tool in request["tools"] if tool.get("name") == "redefined_tool"]
     assert [tool["input_schema"] for tool in redefined] == [new_schema]
+
+
+@pytest.mark.asyncio
+async def test_unwithdrawn_same_name_redefinition_fails_closed():
+    """A same-name redefinition without a tool_removal must not silently drop the old schema."""
+    from litellm.llms.deepseek.messages.transformation import DeepSeekCompatAnthropicMessagesConfig
+    from litellm.types.router import GenericLiteLLMParams
+
+    old_schema = {"type": "object", "properties": {"old": {"type": "string"}}}
+    new_schema = {"type": "object", "properties": {"new": {"type": "boolean"}}}
+    data = {
+        "model": "deepseek-v4-pro",
+        "max_tokens": 50,
+        "tools": [{"name": "redefined_tool", "description": "old", "input_schema": old_schema}],
+        "messages": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "tool_addition",
+                        "tool": {
+                            "type": "tool_definition",
+                            "definition": {"name": "redefined_tool", "description": "new", "input_schema": new_schema},
+                        },
+                    },
+                ],
+            },
+            {"role": "user", "content": "hello"},
+        ],
+    }
+
+    await AnthropicMessagesHandler().process_input_messages(data=data, guardrail_to_apply=MockToolRecordingGuardrail())
+    assert [tool for tool in data["tools"] if tool.get("name") == "redefined_tool"] == [
+        {"name": "redefined_tool", "description": "old", "input_schema": old_schema}
+    ]
+
+    with pytest.raises(litellm.BadRequestError) as excinfo:
+        DeepSeekCompatAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=data["messages"],
+            anthropic_messages_optional_request_params={"max_tokens": 50, "tools": data["tools"]},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+    assert "two declarations" in str(excinfo.value)
