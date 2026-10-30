@@ -1,2 +1,0 @@
-mode=baseline kind=rewrite head=e4980116d097f49fbb00a551f254049e2bf26968
-PASS rewrite_status expected=403 actual=403

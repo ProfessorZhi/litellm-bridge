@@ -1,6 +1,0 @@
-mode=filtered kind=dual head=e4980116d097f49fbb00a551f254049e2bf26968
-PASS dual_spendlogs_delta expected=0 actual=0
-PASS dual_redis_delta expected=6 actual=6
-PASS dual_console_delta expected=0 actual=0
-PASS dual_callback_delta expected=0 actual=0
-[after] spendlogs=71 redis=6 prom=6.0 console_missing=0 callback=35
