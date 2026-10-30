@@ -1,0 +1,15 @@
+HTTP/1.1 422 Unprocessable Content
+date: Fri, 30 Oct 2026 03:32:06 GMT
+x-litellm-call-id: 74b8a6dd-16b7-4e2c-8025-fab304592837
+x-litellm-model-id: 77d3ff2a-d9a2-411d-992d-ec66bba3369a
+x-litellm-version: 1.106.2
+x-litellm-response-cost: 0
+x-litellm-key-spend: 0.0
+x-litellm-timeout: 600.0
+content-length: 524
+content-type: application/json
+x-frame-options: DENY
+content-security-policy: frame-ancestors 'none'
+x-content-type-options: nosniff
+vary: Accept-Encoding
+

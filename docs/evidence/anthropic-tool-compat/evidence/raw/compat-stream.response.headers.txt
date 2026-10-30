@@ -1,0 +1,45 @@
+HTTP/1.1 200 OK
+date: Fri, 30 Oct 2026 03:32:06 GMT
+x-litellm-call-id: 1c47d257-c40b-46c3-8a94-fca1e920717f
+x-litellm-model-id: 85ef6477-ce93-432d-9b6c-b2c9d2133d14
+x-litellm-model-name: anthropic/deepseek-flash
+x-litellm-model-api-base: https://api.deepseek.com/anthropic
+x-litellm-version: 1.106.2
+x-litellm-response-cost-original: 0.0
+x-litellm-response-cost-discount-amount: 0.0
+x-litellm-response-cost-margin-amount: 0.0
+x-litellm-response-cost-margin-percent: 0.0
+x-litellm-response-cost-input: 0.0
+x-litellm-response-cost-output: 0.0
+x-litellm-response-cost-tool-usage: 0.0
+x-litellm-key-spend: 0.0
+x-litellm-response-duration-ms: 193.77398490905762
+x-litellm-overhead-duration-ms: 15.7299
+x-litellm-callback-duration-ms: 0.0
+llm_provider-content-type: text/event-stream; charset=utf-8
+llm_provider-transfer-encoding: chunked
+llm_provider-connection: keep-alive
+llm_provider-date: Fri, 30 Oct 2026 03:32:07 GMT
+llm_provider-x-content-type-options: nosniff
+llm_provider-server: elb
+llm_provider-cache-control: no-cache
+llm_provider-vary: accept-encoding, origin, access-control-request-method, access-control-request-headers
+llm_provider-content-encoding: gzip
+llm_provider-access-control-allow-credentials: true
+llm_provider-x-ds-trace-id: cd344f7059826b08fee19dfc02c9ade1
+llm_provider-strict-transport-security: max-age=31536000; includeSubDomains; preload
+llm_provider-x-cache: Miss from cloudfront
+llm_provider-via: 1.1 7be70415c4abfe1df74aa0fab0cbfbba.cloudfront.net (CloudFront)
+llm_provider-x-amz-cf-pop: NRT20-P1
+llm_provider-x-amz-cf-id: ZHtWr2096RNYwgNVgKvgDpAgn37XosQAlP8MQU5cdWwkVHhk_ap5Lg==
+x-litellm-model-group: v4pro-compat
+x-litellm-attempted-retries: 0
+x-litellm-attempted-fallbacks: 0
+cache-control: no-cache
+x-accel-buffering: no
+content-type: text/event-stream; charset=utf-8
+x-frame-options: DENY
+content-security-policy: frame-ancestors 'none'
+x-content-type-options: nosniff
+Transfer-Encoding: chunked
+

@@ -1,0 +1,12 @@
+v4pro-compat model create: HTTP 200
+v4pro-plain model create: HTTP 200
+direct upstream probe: HTTP 200
+compat: HTTP 200
+plain: HTTP 422
+compat-beta: HTTP 200
+plain-beta: HTTP 422
+compat-stream: HTTP 200
+restricted key generated
+acl-definition: HTTP 403
+acl-reference: HTTP 403
+acl-removal: HTTP 403

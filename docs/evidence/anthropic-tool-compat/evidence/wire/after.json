@@ -1,0 +1,54 @@
+{
+  "model": "v4pro-compat",
+  "max_tokens": 64,
+  "tools": [
+    {
+      "name": "existing_tool",
+      "description": "referenced",
+      "input_schema": {
+        "type": "object"
+      }
+    },
+    {
+      "name": "dynamic_tool",
+      "description": "inline",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "tool policy"
+        },
+        {
+          "type": "tool_addition",
+          "tool": {
+            "type": "tool_reference",
+            "name": "dynamic_tool"
+          }
+        },
+        {
+          "type": "tool_addition",
+          "tool": {
+            "type": "tool_reference",
+            "name": "existing_tool"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "Reply with the single word OK. Do not call a tool."
+    }
+  ]
+}

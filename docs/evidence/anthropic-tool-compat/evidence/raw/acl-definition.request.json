@@ -1,0 +1,1 @@
+{"model":"v4pro-compat","max_tokens":32,"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"secret_definition_live","input_schema":{"type":"object"}}}}]},{"role":"user","content":"case-acl-definition-live"}]}

@@ -1,0 +1,1 @@
+{"model":"v4pro-compat","max_tokens":32,"tools":[{"name":"allowed_tool","input_schema":{"type":"object"}},{"name":"secret_removed_live","input_schema":{"type":"object"}}],"messages":[{"role":"system","content":[{"type":"tool_removal","tool":{"type":"tool_reference","name":"secret_removed_live"}}]},{"role":"user","content":"case-acl-removal-live"}]}

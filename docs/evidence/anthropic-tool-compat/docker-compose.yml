@@ -1,0 +1,77 @@
+name: lit-0226-real23
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lit-0226-real23-postgres
+    labels:
+      work_item: LIT-0226
+      serveros.owner: item:LIT-0226
+      purpose: pr23-real-e2e
+    environment:
+      POSTGRES_USER: lit0226qa
+      POSTGRES_DB: lit0226qa
+      POSTGRES_HOST_AUTH_METHOD: trust
+    networks:
+      - lit-0226-real23-internal
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lit0226qa -d lit0226qa"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: "no"
+    cpus: "0.5"
+    mem_limit: 256m
+    pids_limit: 128
+
+  proxy-live:
+    image: litellm:v1.106.2-fix-all-4170175b1a
+    container_name: lit-0226-real23-proxy
+    labels:
+      work_item: LIT-0226
+      serveros.owner: item:LIT-0226
+      purpose: pr23-real-e2e
+    command:
+      - --config=/app/config.yaml
+      - --host=0.0.0.0
+      - --port=4000
+      - --num_workers=1
+    volumes:
+      - ${LIT0226_REAL_WORKTREE:?LIT0226_REAL_WORKTREE is required}:/src:ro
+      - ./config.live.yaml:/app/config.yaml:ro
+    environment:
+      PYTHONPATH: /src
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY is required}
+      DATABASE_URL: postgresql://lit0226qa@postgres:5432/lit0226qa
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY is required}
+    ports:
+      - 127.0.0.1:26547:4000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lit-0226-real23-internal
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "2"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /app/.venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness')"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 45s
+    restart: "no"
+    cpus: "1.0"
+    mem_limit: 1536m
+    mem_reservation: 512m
+    pids_limit: 256
+
+networks:
+  lit-0226-real23-internal:
+    name: lit-0226-real23-internal
+    driver: bridge

@@ -1,0 +1,21 @@
+{
+  "before_tools": [
+    "old_tool",
+    "existing_tool"
+  ],
+  "after_tools": [
+    "existing_tool",
+    "dynamic_tool"
+  ],
+  "before_block_types": {
+    "text": 1,
+    "tool_addition": 2,
+    "tool_removal": 1
+  },
+  "after_block_types": {
+    "text": 1,
+    "tool_addition": 2
+  },
+  "tool_definition_after": false,
+  "tool_reference_after": true
+}

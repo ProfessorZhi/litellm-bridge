@@ -1,0 +1,1 @@
+{"model":"v4pro-compat","max_tokens":32,"stream":true,"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"stream_tool","input_schema":{"type":"object"}}}}]},{"role":"user","content":"Reply with the single word OK. Do not call a tool."}]}

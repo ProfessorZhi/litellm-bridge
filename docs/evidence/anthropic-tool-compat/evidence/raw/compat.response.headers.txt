@@ -1,0 +1,27 @@
+HTTP/1.1 200 OK
+date: Fri, 30 Oct 2026 03:32:04 GMT
+content-length: 410
+content-type: application/json
+x-litellm-call-id: c24d73b4-8b92-4fa4-bbb1-7d13d78e1263
+x-litellm-model-id: 85ef6477-ce93-432d-9b6c-b2c9d2133d14
+x-litellm-model-name: anthropic/deepseek-flash
+x-litellm-version: 1.106.2
+x-litellm-response-cost: 1.518e-06
+x-litellm-response-cost-original: 1.518e-06
+x-litellm-response-cost-discount-amount: 0.0
+x-litellm-response-cost-margin-amount: 0.0
+x-litellm-response-cost-margin-percent: 0.0
+x-litellm-response-cost-input: 0.0
+x-litellm-response-cost-output: 0.0
+x-litellm-response-cost-cache-read: 1.518e-06
+x-litellm-response-cost-tool-usage: 0.0
+x-litellm-key-spend: 1.518e-06
+x-litellm-response-duration-ms: 674.1580963134766
+x-litellm-overhead-duration-ms: 89.5162
+x-litellm-model-group: v4pro-compat
+x-litellm-attempted-retries: 0
+x-litellm-attempted-fallbacks: 0
+x-frame-options: DENY
+content-security-policy: frame-ancestors 'none'
+x-content-type-options: nosniff
+
