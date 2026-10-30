@@ -842,7 +842,9 @@ class TestAnthropicMessagesHandlerInputProcessing:
         assert seen[0]["function"]["parameters"] == new_schema
         assert seen[0]["function"]["parameters"] != old_schema
         assert data["messages"][0]["content"][1]["tool"]["definition"]["input_schema"] == new_schema
-        assert all(tool.get("name") != "redefined_tool" for tool in data.get("tools", []))
+        assert [tool for tool in data["tools"] if tool.get("name") == "redefined_tool"] == [
+            {"name": "redefined_tool", "description": "old", "input_schema": old_schema}
+        ]
 
     @pytest.mark.asyncio
     async def test_same_name_redefinition_dropped_by_guardrail_fails_closed(self):
@@ -872,7 +874,10 @@ class TestAnthropicMessagesHandlerInputProcessing:
         await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
 
         assert all(block.get("type") != "tool_addition" for block in data["messages"][0]["content"])
-        assert all(tool.get("name") != "redefined_tool" for tool in data.get("tools", []))
+        assert [tool for tool in data["tools"] if tool.get("name") == "redefined_tool"] == [
+            {"name": "redefined_tool", "input_schema": {"type": "object"}}
+        ]
+        assert data["messages"][0]["content"][0]["type"] == "tool_removal"
 
     @pytest.mark.asyncio
     async def test_same_name_redefinition_rewritten_by_guardrail_fails_closed(self):
@@ -3001,3 +3006,45 @@ class TestAnthropicMessagesHandlerPostCallHookResponse:
         native = {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}]}
 
         assert AnthropicMessagesHandler().post_call_hook_response(native) is native
+
+
+@pytest.mark.asyncio
+async def test_same_name_redefinition_still_converts_for_deepseek_after_a_guardrail():
+    """The tool_removal in messages must still resolve against tools[] once a guardrail ran."""
+    from litellm.llms.deepseek.messages.transformation import DeepSeekCompatAnthropicMessagesConfig
+    from litellm.types.router import GenericLiteLLMParams
+
+    new_schema = {"type": "object", "properties": {"new": {"type": "boolean"}}}
+    data = {
+        "model": "deepseek-v4-pro",
+        "max_tokens": 50,
+        "tools": [{"name": "redefined_tool", "description": "old", "input_schema": {"type": "object"}}],
+        "messages": [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "redefined_tool"}},
+                    {
+                        "type": "tool_addition",
+                        "tool": {
+                            "type": "tool_definition",
+                            "definition": {"name": "redefined_tool", "description": "new", "input_schema": new_schema},
+                        },
+                    },
+                ],
+            },
+            {"role": "user", "content": "hello"},
+        ],
+    }
+
+    await AnthropicMessagesHandler().process_input_messages(data=data, guardrail_to_apply=MockToolRecordingGuardrail())
+    request = DeepSeekCompatAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=data["messages"],
+        anthropic_messages_optional_request_params={"max_tokens": 50, "tools": data["tools"]},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    redefined = [tool for tool in request["tools"] if tool.get("name") == "redefined_tool"]
+    assert [tool["input_schema"] for tool in redefined] == [new_schema]

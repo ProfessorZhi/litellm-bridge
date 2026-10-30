@@ -212,3 +212,23 @@ def declared_tools_only(
 ) -> tuple[ChatCompletionToolParam, ...]:
     """Drop inline-declared tools a guardrail returned; they live in messages, not in tools[]."""
     return tuple(tool for tool in guardrailed_tools if not inline_names.intersection(anthropic_tool_names(tool)))
+
+
+def _inline_tool_removal_name(block: object) -> str | None:
+    fields: Final = object_mapping(block)
+    if fields is None or fields.get("type") != "tool_removal":
+        return None
+    tool: Final = object_mapping(fields.get("tool"))
+    return _reference_name(tool) if tool is not None and tool.get("type") == "tool_reference" else None
+
+
+def withdrawn_declarations(data: Mapping[str, object], inline_names: frozenset[str]) -> tuple[object, ...]:
+    """tools[] entries an inline redefinition replaces and a ``tool_removal`` withdraws.
+
+    The guardrail scans the redefinition instead of these, and they must stay in tools[] so
+    the removal still resolves; being withdrawn, the provider cannot call them.
+    """
+    withdrawn: Final = inline_names.intersection(
+        name for block in _system_content_blocks(data.get("messages")) if (name := _inline_tool_removal_name(block))
+    )
+    return tuple(tool for tool in object_list(data.get("tools")) if withdrawn.intersection(anthropic_tool_names(tool)))

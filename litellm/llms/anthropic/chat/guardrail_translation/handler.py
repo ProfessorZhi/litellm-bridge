@@ -35,6 +35,7 @@ from litellm.llms.anthropic.pass_through.messages.tool_changes import (
     inline_tools_denied_by_guardrail,
     messages_without_inline_tools,
     resolve_anthropic_tool_names,
+    withdrawn_declarations,
 )
 from litellm.llms.base_llm.guardrail_translation.base_translation import (
     BaseTranslation,
@@ -667,6 +668,7 @@ class AnthropicMessagesHandler(BaseTranslation):
                     if scan_only_tool_results
                     else [
                         *(tool for tool in data.get("tools") or [] if is_provider_native_tool_dict(tool)),
+                        *withdrawn_declarations(data, inline_names),  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
                         *anthropic_tools,
                     ]
                 )
