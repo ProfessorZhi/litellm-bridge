@@ -1,11 +1,15 @@
 import pytest
 
 import litellm
+from litellm.llms.anthropic.pass_through.messages.handler import (
+    _uses_deepseek_wire_compatibility,
+)
 from litellm.llms.anthropic.pass_through.messages.transformation import (
     AnthropicMessagesConfig,
 )
 from litellm.llms.deepseek.messages.transformation import (
     DeepSeekAnthropicMessagesConfig,
+    DeepSeekCompatAnthropicMessagesConfig,
 )
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
@@ -972,3 +976,95 @@ def test_a_message_that_is_not_an_object_is_forwarded_untouched():
 
     assert messages[1] == "not-a-message"
     assert tools == []
+
+
+# LIT-0226: provider=anthropic deployments that point at a DeepSeek-compatible
+# endpoint can opt into the same wire tool compatibility without changing their
+# provider identity (auth, URL, headers, billing, deployment/router behaviour).
+
+
+def _compat_transform(messages, tools=None):
+    config = DeepSeekCompatAnthropicMessagesConfig()
+    params = {"max_tokens": 100}
+    if tools is not None:
+        params["tools"] = tools
+    return config.transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        anthropic_messages_optional_request_params=params,
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+
+def test_compat_opt_in_is_explicit_and_provider_scoped():
+    assert _uses_deepseek_wire_compatibility("anthropic", {"anthropic_messages_compatibility": "deepseek"})
+    assert not _uses_deepseek_wire_compatibility("deepseek", {"anthropic_messages_compatibility": "deepseek"})
+    assert not _uses_deepseek_wire_compatibility("anthropic", {"anthropic_messages_compatibility": "other"})
+    assert not _uses_deepseek_wire_compatibility("anthropic", None)
+
+
+def test_compat_config_keeps_anthropic_identity():
+    config = DeepSeekCompatAnthropicMessagesConfig()
+
+    assert config.custom_llm_provider == "anthropic"
+    assert config.should_strip_billing_metadata() is False
+    assert (
+        config.get_complete_url(
+            api_base="https://api.deepseek.com/anthropic",
+            api_key=None,
+            model="deepseek-v4-pro",
+            optional_params={},
+            litellm_params={},
+        )
+        == "https://api.deepseek.com/anthropic/v1/messages"
+    )
+
+
+def test_compat_config_converts_wrapped_definition_and_hoists_it():
+    request = _compat_transform(_messages(_body()))
+
+    assert _converted(request) == {"type": "tool_reference", "name": _TOOL}
+    assert any(tool.get("name") == _TOOL for tool in request["tools"])
+
+
+def test_compat_config_refuses_bare_definition_locally():
+    bare = {"type": "tool_definition", "definition": _body()}
+    with pytest.raises(litellm.BadRequestError) as excinfo:
+        _compat_transform([{"role": "user", "content": [bare]}])
+
+    assert excinfo.value.status_code == 400
+    assert "messages[0].content" in str(excinfo.value)
+
+
+def test_compat_config_without_opt_in_leaves_wrapped_definition_untouched():
+    messages = _messages(_body())
+    config = AnthropicMessagesConfig()
+    request = config.transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=messages,
+        anthropic_messages_optional_request_params={"max_tokens": 100},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    assert request["messages"] == messages
+    assert "tools" not in request
+
+
+def test_compat_config_reuses_deepseek_tool_sanitization():
+    request = _compat_transform(
+        _messages(_body()),
+        tools=[{"type": "custom", "name": "local_tool", "input_schema": _SCHEMA}],
+    )
+
+    local = next(tool for tool in request["tools"] if tool.get("name") == "local_tool")
+    assert "type" not in local
+
+
+def test_compat_config_refuses_a_non_list_tools_container():
+    with pytest.raises(litellm.BadRequestError) as excinfo:
+        _compat_transform([{"role": "user", "content": "hi"}], tools=5)
+
+    assert excinfo.value.status_code == 400
+    assert "tools to be a list" in str(excinfo.value)

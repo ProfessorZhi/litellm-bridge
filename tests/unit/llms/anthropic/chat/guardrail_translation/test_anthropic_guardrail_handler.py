@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-
+import litellm
 from litellm.integrations.custom_guardrail import CustomGuardrail
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.llms.base_llm.guardrail_translation.base_translation import StreamingScanKey
@@ -68,6 +68,57 @@ class MockRecordingGuardrail(CustomGuardrail):
         logging_obj: Optional[Any] = None,
     ) -> GenericGuardrailAPIInputs:
         self.request_data = request_data
+        return inputs
+
+
+class MockToolRecordingGuardrail(CustomGuardrail):
+    """Record the tools it was handed, optionally dropping one by name."""
+
+    def __init__(self, drop_tool: Optional[str] = None):
+        super().__init__(guardrail_name="tool-recording")
+        self.inputs: Optional[GenericGuardrailAPIInputs] = None
+        self.drop_tool = drop_tool
+
+    async def apply_guardrail(
+        self,
+        inputs: GenericGuardrailAPIInputs,
+        request_data: dict,
+        input_type: Literal["request", "response"],
+        logging_obj: Optional[Any] = None,
+    ) -> GenericGuardrailAPIInputs:
+        self.inputs = inputs
+        tools = inputs.get("tools")
+        if tools is not None and self.drop_tool is not None:
+            inputs["tools"] = [
+                tool
+                for tool in tools
+                if not (isinstance(tool, dict) and tool.get("function", {}).get("name") == self.drop_tool)
+            ]
+        return inputs
+
+
+class MockToolRewritingGuardrail(MockToolRecordingGuardrail):
+    """Record tools, then rewrite one tool's schema to simulate a guardrail change."""
+
+    def __init__(self, tool_name: str):
+        super().__init__()
+        self.tool_name = tool_name
+
+    async def apply_guardrail(
+        self,
+        inputs: GenericGuardrailAPIInputs,
+        request_data: dict,
+        input_type: Literal["request", "response"],
+        logging_obj: Optional[Any] = None,
+    ) -> GenericGuardrailAPIInputs:
+        inputs = await super().apply_guardrail(inputs, request_data, input_type, logging_obj)
+        tools = inputs.get("tools")
+        for tool in tools or []:
+            if isinstance(tool, dict) and tool.get("function", {}).get("name") == self.tool_name:
+                tool["function"]["parameters"] = {
+                    "type": "object",
+                    "properties": {"rewritten": {"type": "string"}},
+                }
         return inputs
 
 
@@ -545,6 +596,227 @@ class TestAnthropicMessagesHandlerInputProcessing:
 
         assert {"googleMaps": {"enable_widget": True}} in data["tools"]
         assert [tool["name"] for tool in data["tools"] if "name" in tool] == ["get_weather"]
+
+    @pytest.mark.asyncio
+    async def test_inline_tool_definition_is_visible_to_a_generic_guardrail(self):
+        handler = AnthropicMessagesHandler()
+        guardrail = MockToolRecordingGuardrail()
+        data = {
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "inline_tool",
+                                    "description": "inline",
+                                    "input_schema": {
+                                        "type": "object",
+                                        "properties": {"q": {"type": "string"}},
+                                    },
+                                },
+                            },
+                        }
+                    ],
+                },
+            ],
+        }
+
+        await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
+
+        assert guardrail.inputs is not None
+        tools = guardrail.inputs["tools"]
+        inline = next(tool for tool in tools if tool["function"]["name"] == "inline_tool")
+        assert inline["function"]["parameters"]["properties"]["q"]["type"] == "string"
+        assert all(tool.get("name") != "inline_tool" for tool in data.get("tools", []))
+
+    @pytest.mark.asyncio
+    async def test_a_generic_guardrail_can_drop_an_inline_tool_definition(self):
+        handler = AnthropicMessagesHandler()
+        guardrail = MockToolRecordingGuardrail(drop_tool="inline_tool")
+        data = {
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "inline_tool",
+                                    "input_schema": {"type": "object"},
+                                },
+                            },
+                        }
+                    ],
+                },
+            ],
+        }
+
+        await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
+
+        assert data["messages"][1]["content"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_inline_tool_without_text_still_reaches_generic_guardrail(self, stream: bool):
+        handler = AnthropicMessagesHandler()
+        guardrail = MockToolRecordingGuardrail()
+        data = {
+            "model": "claude-3-5-sonnet-20241022",
+            "stream": stream,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "only_inline_tool",
+                                    "input_schema": {"type": "object"},
+                                },
+                            },
+                        }
+                    ],
+                },
+                {"role": "user", "content": []},
+            ],
+        }
+
+        await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
+
+        assert guardrail.inputs is not None
+        assert [tool["function"]["name"] for tool in guardrail.inputs["tools"]] == ["only_inline_tool"]
+
+    @pytest.mark.asyncio
+    async def test_declared_tools_without_text_still_reach_generic_guardrail(self):
+        handler = AnthropicMessagesHandler()
+        guardrail = MockToolRecordingGuardrail()
+        data = {
+            "model": "claude-3-5-sonnet-20241022",
+            "tools": [{"name": "declared_tool", "input_schema": {"type": "object"}}],
+            "messages": [{"role": "user", "content": []}],
+        }
+
+        await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
+
+        assert guardrail.inputs is not None
+        assert [tool["function"]["name"] for tool in guardrail.inputs["tools"]] == ["declared_tool"]
+
+    @pytest.mark.asyncio
+    async def test_same_name_redefinition_is_scanned_with_the_effective_schema(self):
+        handler = AnthropicMessagesHandler()
+        guardrail = MockToolRecordingGuardrail()
+        old_schema = {"type": "object", "properties": {"old": {"type": "string"}}}
+        new_schema = {"type": "object", "properties": {"new": {"type": "boolean"}}}
+        data = {
+            "model": "claude-3-5-sonnet-20241022",
+            "tools": [{"name": "redefined_tool", "description": "old", "input_schema": old_schema}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "redefined_tool"}},
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {
+                                    "name": "redefined_tool",
+                                    "description": "new",
+                                    "input_schema": new_schema,
+                                },
+                            },
+                        },
+                    ],
+                },
+                {"role": "user", "content": "hello"},
+            ],
+        }
+
+        await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
+
+        assert guardrail.inputs is not None
+        seen = [tool for tool in guardrail.inputs["tools"] if tool["function"]["name"] == "redefined_tool"]
+        assert len(seen) == 1
+        assert seen[0]["function"]["parameters"] == new_schema
+        assert seen[0]["function"]["parameters"] != old_schema
+        assert data["messages"][0]["content"][1]["tool"]["definition"]["input_schema"] == new_schema
+        assert [tool for tool in data["tools"] if tool.get("name") == "redefined_tool"] == [
+            {"name": "redefined_tool", "description": "old", "input_schema": old_schema}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_same_name_redefinition_dropped_by_guardrail_fails_closed(self):
+        handler = AnthropicMessagesHandler()
+        guardrail = MockToolRecordingGuardrail(drop_tool="redefined_tool")
+        data = {
+            "model": "claude-3-5-sonnet-20241022",
+            "tools": [{"name": "redefined_tool", "input_schema": {"type": "object"}}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "redefined_tool"}},
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {"name": "redefined_tool", "input_schema": {"type": "object"}},
+                            },
+                        },
+                    ],
+                },
+                {"role": "user", "content": "hello"},
+            ],
+        }
+
+        await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
+
+        assert all(block.get("type") != "tool_addition" for block in data["messages"][0]["content"])
+        assert [tool for tool in data["tools"] if tool.get("name") == "redefined_tool"] == [
+            {"name": "redefined_tool", "input_schema": {"type": "object"}}
+        ]
+        assert data["messages"][0]["content"][0]["type"] == "tool_removal"
+
+    @pytest.mark.asyncio
+    async def test_same_name_redefinition_rewritten_by_guardrail_fails_closed(self):
+        handler = AnthropicMessagesHandler()
+        guardrail = MockToolRewritingGuardrail("redefined_tool")
+        data = {
+            "model": "claude-3-5-sonnet-20241022",
+            "tools": [{"name": "redefined_tool", "input_schema": {"type": "object"}}],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "tool_addition",
+                            "tool": {
+                                "type": "tool_definition",
+                                "definition": {"name": "redefined_tool", "input_schema": {"type": "object"}},
+                            },
+                        }
+                    ],
+                },
+                {"role": "user", "content": "hello"},
+            ],
+        }
+
+        await handler.process_input_messages(data=data, guardrail_to_apply=guardrail)
+
+        assert all(block.get("type") != "tool_addition" for block in data["messages"][0]["content"])
+        assert all(tool.get("name") != "redefined_tool" for tool in data.get("tools", []))
 
     @pytest.mark.asyncio
     async def test_midturn_system_correction_is_guardrailed_when_top_level_system_is_skipped(
@@ -2646,3 +2918,91 @@ class TestAnthropicMessagesHandlerPostCallHookResponse:
         native = {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}]}
 
         assert AnthropicMessagesHandler().post_call_hook_response(native) is native
+
+
+@pytest.mark.asyncio
+async def test_same_name_redefinition_still_converts_for_deepseek_after_a_guardrail():
+    """The tool_removal in messages must still resolve against tools[] once a guardrail ran."""
+    from litellm.llms.deepseek.messages.transformation import DeepSeekCompatAnthropicMessagesConfig
+    from litellm.types.router import GenericLiteLLMParams
+
+    new_schema = {"type": "object", "properties": {"new": {"type": "boolean"}}}
+    data = {
+        "model": "deepseek-v4-pro",
+        "max_tokens": 50,
+        "tools": [{"name": "redefined_tool", "description": "old", "input_schema": {"type": "object"}}],
+        "messages": [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "tool_removal", "tool": {"type": "tool_reference", "name": "redefined_tool"}},
+                    {
+                        "type": "tool_addition",
+                        "tool": {
+                            "type": "tool_definition",
+                            "definition": {"name": "redefined_tool", "description": "new", "input_schema": new_schema},
+                        },
+                    },
+                ],
+            },
+            {"role": "user", "content": "hello"},
+        ],
+    }
+
+    await AnthropicMessagesHandler().process_input_messages(data=data, guardrail_to_apply=MockToolRecordingGuardrail())
+    request = DeepSeekCompatAnthropicMessagesConfig().transform_anthropic_messages_request(
+        model="deepseek-v4-pro",
+        messages=data["messages"],
+        anthropic_messages_optional_request_params={"max_tokens": 50, "tools": data["tools"]},
+        litellm_params=GenericLiteLLMParams(),
+        headers={},
+    )
+
+    redefined = [tool for tool in request["tools"] if tool.get("name") == "redefined_tool"]
+    assert [tool["input_schema"] for tool in redefined] == [new_schema]
+
+
+@pytest.mark.asyncio
+async def test_unwithdrawn_same_name_redefinition_fails_closed():
+    """A same-name redefinition without a tool_removal must not silently drop the old schema."""
+    from litellm.llms.deepseek.messages.transformation import DeepSeekCompatAnthropicMessagesConfig
+    from litellm.types.router import GenericLiteLLMParams
+
+    old_schema = {"type": "object", "properties": {"old": {"type": "string"}}}
+    new_schema = {"type": "object", "properties": {"new": {"type": "boolean"}}}
+    data = {
+        "model": "deepseek-v4-pro",
+        "max_tokens": 50,
+        "tools": [{"name": "redefined_tool", "description": "old", "input_schema": old_schema}],
+        "messages": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "tool_addition",
+                        "tool": {
+                            "type": "tool_definition",
+                            "definition": {"name": "redefined_tool", "description": "new", "input_schema": new_schema},
+                        },
+                    },
+                ],
+            },
+            {"role": "user", "content": "hello"},
+        ],
+    }
+
+    await AnthropicMessagesHandler().process_input_messages(data=data, guardrail_to_apply=MockToolRecordingGuardrail())
+    assert [tool for tool in data["tools"] if tool.get("name") == "redefined_tool"] == [
+        {"name": "redefined_tool", "description": "old", "input_schema": old_schema}
+    ]
+
+    with pytest.raises(litellm.BadRequestError) as excinfo:
+        DeepSeekCompatAnthropicMessagesConfig().transform_anthropic_messages_request(
+            model="deepseek-v4-pro",
+            messages=data["messages"],
+            anthropic_messages_optional_request_params={"max_tokens": 50, "tools": data["tools"]},
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+    assert "two declarations" in str(excinfo.value)

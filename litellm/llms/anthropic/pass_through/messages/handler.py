@@ -36,6 +36,7 @@ from litellm.utils import ProviderConfigManager, client
 from ..adapters.handler import LiteLLMMessagesToCompletionTransformationHandler
 from ..responses_adapters.handler import LiteLLMMessagesToResponsesAPIHandler
 from .interceptors import get_messages_interceptors
+from .tool_changes import object_mapping
 from .utils import AnthropicMessagesRequestUtils, mock_response, prepare_native_messages
 
 __all__ = ("anthropic_messages", "anthropic_messages_handler")
@@ -102,6 +103,12 @@ def _deployment_passes_through_anthropic_messages(model_info: object) -> bool:
 
 def _deployment_supports_cache_control_ttl(model_info: object) -> bool:
     return isinstance(model_info, dict) and model_info.get("cache_control_ttl") is True
+
+
+def _uses_deepseek_wire_compatibility(provider: str | None, model_info: object) -> bool:
+    """Explicit deployment opt-in; real Anthropic endpoints keep their native tool semantics."""
+    info: Final = object_mapping(model_info)
+    return provider == "anthropic" and info is not None and info.get("anthropic_messages_compatibility") == "deepseek"
 
 
 ####### ENVIRONMENT VARIABLES ###################
@@ -542,6 +549,17 @@ def anthropic_messages_handler(
         anthropic_messages_provider_config = ProviderConfigManager.get_provider_anthropic_messages_config(
             model=model,
             provider=litellm.LlmProviders(custom_llm_provider),
+        )
+    if _uses_deepseek_wire_compatibility(
+        custom_llm_provider,
+        kwargs.get("model_info"),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]  # kwargs carries the router's untyped model_info
+    ):
+        from litellm.llms.deepseek.messages.transformation import (
+            DeepSeekCompatAnthropicMessagesConfig,
+        )
+
+        anthropic_messages_provider_config = (  # rebind-ok: deployment opt-in replaces the provider config
+            DeepSeekCompatAnthropicMessagesConfig()
         )
     if anthropic_messages_provider_config is None and _deployment_passes_through_anthropic_messages(
         kwargs.get("model_info")

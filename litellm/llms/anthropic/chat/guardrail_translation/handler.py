@@ -29,6 +29,15 @@ from litellm.llms.anthropic.pass_through.adapters.transformation import (
     LiteLLMAnthropicMessagesAdapter,
     is_provider_native_tool_dict,
 )
+from litellm.llms.anthropic.pass_through.messages.tool_changes import (
+    declared_tools_only,
+    inline_guardrail_tools,
+    inline_tools_denied_by_guardrail,
+    messages_without_inline_tools,
+    resolve_anthropic_tool_names,
+    shadowed_declarations,
+    withdrawn_tool_names,
+)
 from litellm.llms.base_llm.guardrail_translation.base_translation import (
     BaseTranslation,
     StreamingScanKey,
@@ -282,6 +291,17 @@ def _tool_call_shapes(tool_calls: Sequence[object]) -> tuple[_ToolCallShape, ...
         )
         for function in functions
     )
+
+
+def _declared_tools_for_guardrail(
+    tools: Sequence[ChatCompletionToolParam], inline_names: frozenset[str]
+) -> list[ChatCompletionToolParam]:
+    """Client tools not replaced by an inline declaration of the same name."""
+    return [
+        tool
+        for tool in tools
+        if not is_provider_native_tool_dict(tool) and not inline_names.intersection(anthropic_tool_names(tool))
+    ]
 
 
 class _AnthropicSSEDelta(TypedDict, total=False):
@@ -567,14 +587,13 @@ class AnthropicMessagesHandler(BaseTranslation):
         )
         structured_messages: Final = [full_structured_messages[index] for index in scoped_message_indices]
 
+        inline_tools_to_check, inline_definitions = inline_guardrail_tools(data, scan_only_tool_results)  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
+        inline_names: Final = frozenset(inline_definitions)
         tools_to_check: Final[list[ChatCompletionToolParam]] = (
             []
             if scan_only_tool_results
-            else [
-                tool
-                for tool in chat_completion_compatible_request.get("tools", [])
-                if not is_provider_native_tool_dict(tool)
-            ]
+            else _declared_tools_for_guardrail(chat_completion_compatible_request.get("tools", []), inline_names)
+            + list(inline_tools_to_check)
         )
 
         # Step 1: Extract all text content, images, and tool calls
@@ -604,7 +623,7 @@ class AnthropicMessagesHandler(BaseTranslation):
         pre_guardrail_tool_calls: Final = _tool_call_shapes(tool_calls_to_check)
 
         # Step 2: Apply guardrail to all texts and tool calls in batch
-        if texts_to_check or tool_calls_to_check:
+        if texts_to_check or tool_calls_to_check or tools_to_check:
             inputs: Final = GenericGuardrailAPIInputs(texts=texts_to_check)
             if images_to_check:
                 inputs["images"] = images_to_check
@@ -629,10 +648,17 @@ class AnthropicMessagesHandler(BaseTranslation):
             guardrailed_texts: Final = guardrailed_inputs.get("texts", [])
             guardrailed_tools: Final = guardrailed_inputs.get("tools")
             if guardrailed_tools is not None:
+                denied_inline_names: Final = inline_tools_denied_by_guardrail(guardrailed_tools, inline_definitions)
+                kept_shadowed_names: Final = (inline_names - denied_inline_names) | (
+                    denied_inline_names & withdrawn_tool_names(data)
+                )
+                if denied_inline_names:
+                    kept_messages: Final = messages_without_inline_tools(data.get("messages"), denied_inline_names)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # proxy request body is an untyped dict
+                    data["messages"] = kept_messages  # rebind-ok: tools[] is rewritten in place below too
                 # Convert tools back from OpenAI format to Anthropic format
                 anthropic_config: Final = AnthropicConfig()
                 anthropic_tools: Final[list[AllAnthropicToolsValues]] = []
-                for tool in guardrailed_tools:
+                for tool in declared_tools_only(guardrailed_tools, inline_names):
                     converted_tool, mcp_server = anthropic_config.map_tool_helper(tool)
                     if converted_tool is not None:
                         anthropic_tools.append(converted_tool)
@@ -646,6 +672,7 @@ class AnthropicMessagesHandler(BaseTranslation):
                     if scan_only_tool_results
                     else [
                         *(tool for tool in data.get("tools") or [] if is_provider_native_tool_dict(tool)),
+                        *shadowed_declarations(data, kept_shadowed_names),  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
                         *anthropic_tools,
                     ]
                 )
@@ -921,9 +948,9 @@ class AnthropicMessagesHandler(BaseTranslation):
         )
 
     def extract_request_tool_names(self, data: dict) -> list[str]:
-        """Extract every tool name in an Anthropic messages request: tools[].name, plus
-        tools[].function.name for OpenAI-format tools the bridge forwards verbatim."""
-        return [name for tool in data.get("tools") or [] for name in anthropic_tool_names(tool)]
+        """Every tool the request can act on: tools[].name, tools[].function.name for OpenAI-format
+        tools the bridge forwards verbatim, and inline mid-conversation additions."""
+        return list(resolve_anthropic_tool_names(data))  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
 
     @classmethod
     def _extract_input_text_and_images(
