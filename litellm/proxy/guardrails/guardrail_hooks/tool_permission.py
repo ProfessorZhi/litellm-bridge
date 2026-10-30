@@ -676,6 +676,7 @@ class ToolPermissionGuardrail(CustomGuardrail):
         self,
         data: dict,
         denied_tool_names: list[str],
+        call_type: object = None,
     ):
         """
         Modify the request to replace denied tool_calls blocks with error results
@@ -719,7 +720,7 @@ class ToolPermissionGuardrail(CustomGuardrail):
         if named_function_call in error_tool_names:
             data["function_call"] = "none"
 
-        if "messages" in data:
+        if is_anthropic_messages_call(call_type) and "messages" in data:
             kept_messages: Final = messages_without_inline_tools(data["messages"], error_tool_names)  # pyright: ignore[reportUnknownArgumentType]  # proxy request body is an untyped dict
             data["messages"] = kept_messages  # rebind-ok: the method already rewrites the request in place
 
@@ -852,7 +853,7 @@ class ToolPermissionGuardrail(CustomGuardrail):
                 denied_tool_names.append(tool_name)
 
         if denied_tool_names:
-            data = self._modify_request_with_permission_errors(data, denied_tool_names)
+            data = self._modify_request_with_permission_errors(data, denied_tool_names, call_type)
 
         verbose_proxy_logger.debug("Tool Permission Guardrail Pre-Call Hook: All tools allowed")
 

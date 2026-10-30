@@ -7,6 +7,7 @@ chat-completions and Responses bridges drop the removal block but still forward
 A removal-only request therefore still has to satisfy the allowlist.
 """
 
+import json
 from collections.abc import Iterable, Iterator, Mapping, Sequence, Set
 from itertools import chain
 from typing import Final
@@ -153,36 +154,61 @@ def _openai_tool_from_definition(definition: Mapping[str, object]) -> ChatComple
     return ChatCompletionToolParam(type="function", function=function)
 
 
+def _canonical(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _named_tools(tools: Sequence[ChatCompletionToolParam]) -> Iterator[tuple[str, ChatCompletionToolParam]]:
+    for tool in tools:
+        for name in anthropic_tool_names(tool):
+            yield name, tool
+
+
+def _tool_matches_definition(tool: object, definition: Mapping[str, object]) -> bool:
+    fields: Final = object_mapping(tool)
+    function: Final = object_mapping(fields.get("function")) if fields is not None else None
+    if function is None or function.get("name") != definition.get("name"):
+        return False
+    if function.get("description") != definition.get("description"):
+        return False
+    return _canonical(function.get("parameters")) == _canonical(definition.get("input_schema"))
+
+
 def inline_guardrail_tools(
     data: Mapping[str, object], scan_only: bool
-) -> tuple[tuple[ChatCompletionToolParam, ...], frozenset[str]]:
-    """Inline definitions a guardrail must also scan, and the names declared only inline."""
+) -> tuple[tuple[ChatCompletionToolParam, ...], Mapping[str, Mapping[str, object]]]:
+    """Inline declarations a guardrail must scan, keyed by their final name.
+
+    A same-name redefinition replaces the ``tools[]`` declaration in the scan, so the
+    guardrail inspects the schema the provider will actually receive.
+    """
     if scan_only:
-        return (), frozenset()
-    definitions: Final = inline_tool_definitions(data)
-    declared: Final = frozenset(
-        chain.from_iterable(anthropic_tool_names(tool) for tool in object_list(data.get("tools")))
-    )
-    inline_only: Final = frozenset(
-        name for definition in definitions if isinstance(name := definition.get("name"), str) and name not in declared
-    )
+        return (), {}
+    definitions: Final = {
+        name: definition
+        for definition in inline_tool_definitions(data)
+        if isinstance(name := definition.get("name"), str) and name
+    }
     tools: Final = tuple(
-        tool
-        for definition in definitions
-        if definition.get("name") in inline_only and (tool := _openai_tool_from_definition(definition)) is not None
+        tool for definition in definitions.values() if (tool := _openai_tool_from_definition(definition)) is not None
     )
-    return tools, inline_only
+    return tools, definitions
 
 
 def inline_tools_denied_by_guardrail(
-    guardrailed_tools: Sequence[ChatCompletionToolParam], inline_only_names: frozenset[str]
+    guardrailed_tools: Sequence[ChatCompletionToolParam],
+    inline_definitions: Mapping[str, Mapping[str, object]],
 ) -> frozenset[str]:
-    returned: Final = frozenset(chain.from_iterable(anthropic_tool_names(tool) for tool in guardrailed_tools))
-    return inline_only_names - returned
+    returned: Final = dict(_named_tools(guardrailed_tools))
+    return frozenset(
+        name
+        for name, definition in inline_definitions.items()
+        if name not in returned or not _tool_matches_definition(returned[name], definition)
+    )
 
 
 def declared_tools_only(
-    guardrailed_tools: Sequence[ChatCompletionToolParam], inline_only_names: frozenset[str]
+    guardrailed_tools: Sequence[ChatCompletionToolParam], inline_names: frozenset[str]
 ) -> tuple[ChatCompletionToolParam, ...]:
-    """Drop the inline-only tools a guardrail returned; they live in messages, not in tools[]."""
-    return tuple(tool for tool in guardrailed_tools if not inline_only_names.intersection(anthropic_tool_names(tool)))
+    """Drop inline-declared tools a guardrail returned; they live in messages, not in tools[]."""
+    return tuple(tool for tool in guardrailed_tools if not inline_names.intersection(anthropic_tool_names(tool)))
