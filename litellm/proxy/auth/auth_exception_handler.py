@@ -27,6 +27,12 @@ from litellm.proxy.auth.auth_utils import (  # noqa: F401  # legacy module expor
     mark_invalid_virtual_key_error,
     normalize_request_route,
 )
+from litellm.proxy.auth.missing_api_key import (
+    MissingAPIKeyError,
+    record_missing_api_key_request,
+    should_count_missing_api_key_requests,
+    should_suppress_missing_api_key_logs,
+)
 from litellm.proxy.auth.model_access_denied import ModelAccessDeniedHTTPException
 from litellm.proxy.db.exception_handler import PrismaDBExceptionHandler
 from litellm.types.services import ServiceTypes
@@ -181,6 +187,15 @@ class UserAPIKeyAuthExceptionHandler:
             )
         else:
             # raise the exception to the caller
+            is_missing_api_key: Final = isinstance(e, MissingAPIKeyError)
+            if is_missing_api_key and should_count_missing_api_key_requests(general_settings):
+                from litellm.integrations.prometheus import PrometheusLogger
+                from litellm.proxy.proxy_server import redis_usage_cache
+
+                await record_missing_api_key_request(PrometheusLogger.get_instance(), redis_usage_cache)
+            suppress_missing_api_key_logs: Final = is_missing_api_key and should_suppress_missing_api_key_logs(
+                general_settings
+            )
             requester_ip: Final = get_request_ip_address(
                 request=request,
                 use_x_forwarded_for=general_settings.get("use_x_forwarded_for") is True,
@@ -194,15 +209,16 @@ class UserAPIKeyAuthExceptionHandler:
             is_invalid_virtual_key: Final = is_invalid_virtual_key_error(e)
             is_quiet_log: Final = is_invalid_virtual_key and not litellm.log_client_error_tracebacks
             logger: Final = verbose_proxy_stdout_logger if is_quiet_log else verbose_proxy_logger
-            logger.log(
-                logging.WARNING if is_quiet_log else logging.ERROR,
-                "litellm.proxy.proxy_server.user_api_key_auth(): Exception occured - %s\nRequester IP Address:%s%s",
-                e,
-                requester_ip,
-                _identity_log_suffix(resolved_identity),
-                exc_info=True if litellm.log_client_error_tracebacks or not is_expected_client_error(e) else None,
-                extra=log_extra,
-            )
+            if not suppress_missing_api_key_logs:
+                logger.log(
+                    logging.WARNING if is_quiet_log else logging.ERROR,
+                    "litellm.proxy.proxy_server.user_api_key_auth(): Exception occured - %s\nRequester IP Address:%s%s",
+                    e,
+                    requester_ip,
+                    _identity_log_suffix(resolved_identity),
+                    exc_info=True if litellm.log_client_error_tracebacks or not is_expected_client_error(e) else None,
+                    extra=log_extra,
+                )
 
             # Log this exception to OTEL, Datadog etc. Reuse the identity resolved
             # before the failure (team alias/id, metadata, user) so the failed span
@@ -238,12 +254,16 @@ class UserAPIKeyAuthExceptionHandler:
                 )
 
             # Allow callbacks to transform the error response
-            transformed_exception: Final = await proxy_logging_obj.post_call_failure_hook(
-                request_data=_with_client_context(request_data, requester_ip, user_agent),
-                original_exception=e,
-                user_api_key_dict=user_api_key_dict,
-                error_type=ProxyErrorTypes.auth_error,
-                route=route,
+            transformed_exception: Final = (
+                None
+                if suppress_missing_api_key_logs
+                else await proxy_logging_obj.post_call_failure_hook(
+                    request_data=_with_client_context(request_data, requester_ip, user_agent),
+                    original_exception=e,
+                    user_api_key_dict=user_api_key_dict,
+                    error_type=ProxyErrorTypes.auth_error,
+                    route=route,
+                )
             )
             # Use transformed exception if callback returned one, otherwise use original
             if transformed_exception is not None:

@@ -436,6 +436,12 @@ class PrometheusLogger(CustomLogger):
                 labelnames=self.get_labels_for_metric("litellm_proxy_total_requests_metric"),
             )
 
+            self.litellm_missing_api_key_requests_metric = self._counter_factory(
+                name="litellm_missing_api_key_requests",
+                documentation="Total number of requests rejected because no API key was presented",
+                labelnames=(),
+            )
+
             # request latency metrics
             self.litellm_request_total_latency_metric = self._histogram_factory(
                 "litellm_request_total_latency_metric",

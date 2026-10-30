@@ -108,6 +108,7 @@ from litellm.proxy.auth.auth_utils import (
     route_in_additonal_public_routes,
 )
 from litellm.proxy.auth.handle_jwt import JWTAuthManager, JWTHandler
+from litellm.proxy.auth.missing_api_key import MissingAPIKeyError
 from litellm.proxy.auth.network import TrustedProxyConfig, resolve_network_context
 from litellm.proxy.auth.oauth2_check import Oauth2Handler
 from litellm.proxy.auth.oauth2_proxy_hook import handle_oauth2_proxy_request
@@ -1961,7 +1962,7 @@ async def user_api_key_auth_builder(
                     parent_otel_span=parent_otel_span,
                 )
         elif api_key is None:  # only require api key if master key is set
-            raise Exception("No api key passed in.")
+            raise MissingAPIKeyError("No api key passed in.")
         elif api_key == "":
             # missing 'Bearer ' prefix
             raise Exception("Malformed API Key passed in. Ensure Key has `Bearer ` prefix.")
