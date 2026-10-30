@@ -12,6 +12,7 @@ SUMMARY="$OUT/summary-$MODE-$KIND.txt"
 FAILED=0
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:4000}"
+BOGUS_KEY="${BOGUS_KEY:-sk-e2e-bogus}"
 PROXY_CONTAINER="${PROXY_CONTAINER:-litellm-authfilter-proxy}"
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-litellm-authfilter-postgres}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-litellm-authfilter-redis}"
@@ -95,7 +96,7 @@ req models_no_auth GET "" "/v1/models" "" > "$TMP/status_models"
 req messages_no_auth POST "" "/v1/messages" '{"model":"mock-chat","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}' > "$TMP/status_messages"
 req chat_no_auth POST "" "/v1/chat/completions" '{"model":"mock-chat","messages":[{"role":"user","content":"hi"}]}' > "$TMP/status_chat"
 req bearer_empty POST "Bearer " "/v1/chat/completions" '{"model":"mock-chat","messages":[{"role":"user","content":"hi"}]}' > "$TMP/status_bearer"
-req bogus_key POST "Bearer sk-bogus-not-a-key" "/v1/chat/completions" '{"model":"mock-chat","messages":[{"role":"user","content":"hi"}]}' > "$TMP/status_bogus"
+req bogus_key POST "Bearer $BOGUS_KEY" "/v1/chat/completions" '{"model":"mock-chat","messages":[{"role":"user","content":"hi"}]}' > "$TMP/status_bogus"
 expired_response=$(curl -s -X POST "$BASE_URL/key/generate" -H "Authorization: Bearer $LITELLM_MASTER_KEY" -H 'Content-Type: application/json' -d "{\"duration\":\"1s\",\"models\":[\"mock-chat\"],\"key_alias\":\"missing-key-e2e-$(date +%s)\"}")
 expired_key=$(echo "$expired_response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')
 sleep 3
